@@ -1,0 +1,9 @@
+{
+  "name": "adeptio-gantt-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker API + D1 backend for Adeptio Project Tracking",
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}
