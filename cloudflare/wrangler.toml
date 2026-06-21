@@ -3,12 +3,11 @@ main = "worker.js"
 compatibility_date = "2025-01-01"
 
 # --- D1 binding (the Worker reads it as env.DB) ---
-# Create with:  npx wrangler d1 create adeptio-gantt
-# then paste the printed database_id below.
+# Created via Cloudflare D1; database_id below is the live database.
 [[d1_databases]]
 binding = "DB"
 database_name = "adeptio-gantt"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "4dbdec99-fdea-411a-b4fa-d8ea3597315e"
 
 # --- Scheduled backups ---
 # Daily 18:00 UTC (01:00 Bangkok) and weekly Sunday 18:30 UTC.
