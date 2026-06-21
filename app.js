@@ -1,5 +1,3 @@
-const API_BASE  = "https://adeptio-gantt.pathom-bot.workers.dev";
-const API_TOKEN = "adeptiolab.com";
 "use strict";
 /* ============================================================================
    ADEPTIO PROJECT TRACKING — Blueprint v2.2 (vanilla JS SPA)
