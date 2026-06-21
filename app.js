@@ -1,5 +1,3 @@
-const API_BASE  = "https://adeptio-gantt.pathom-bot.workers.dev";
-const API_TOKEN = "adeptiolab.com";
 "use strict";
 /* ============================================================================
    ADEPTIO PROJECT TRACKING — Blueprint v2.2 (vanilla JS SPA)
@@ -91,8 +89,8 @@ function safeSet(v){ try{ localStorage.setItem(LS_KEY,v); return true; }catch(e)
 /* ---- Cloud sync config (optional). Point API_BASE at your Cloudflare Worker to
    enable shared, cross-device persistence + server/drive backups. Leave empty and
    the app runs purely on localStorage (offline). API_TOKEN must match the Worker. */
-const API_BASE  = "";          // e.g. "https://adeptio-gantt.<your-subdomain>.workers.dev"
-const API_TOKEN = "";          // must equal the Worker's API_TOKEN secret (if it sets one)
+const API_BASE  = "https://adeptio-gantt.pathom-bot.workers.dev"; // e.g. "https://adeptio-gantt.<your-subdomain>.workers.dev"
+const API_TOKEN = "adeptiolab.com"; // must equal the Worker's API_TOKEN secret (if it sets one)       
 const WORKSPACE = "default";
 const cloudOn = () => !!API_BASE;
 function apiUrl(path){ const sep = path.includes("?") ? "&" : "?"; return API_BASE.replace(/\/$/,"") + path + sep + "ws=" + encodeURIComponent(WORKSPACE); }
