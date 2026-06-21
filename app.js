@@ -75,13 +75,29 @@ const IC = {
   imp:   ic('<path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>'),
   exp:   ic('<path d="M12 21V9m0 0l-4 4m4-4l4 4M4 7V5a2 2 0 012-2h12a2 2 0 012 2v2"/>'),
   arrow: ic('<path d="M5 12h14M13 6l6 6-6 6"/>'),
+  cloud: ic('<path d="M7 18a4 4 0 01-.5-7.97 5.5 5.5 0 0110.55-1.3A4 4 0 0117.5 18H7z"/>'),
+  restore: ic('<path d="M3 12a9 9 0 109-9 9 9 0 00-7 3.3M3 4v3.5h3.5"/><path d="M12 8v4l3 2"/>'),
 };
 
-/* =====================  STORE (local; swap to API for Turso/Netlify)  ===== */
+/* =====================  STORE (local-first, optional cloud sync)  ===== */
 const LS_KEY = "adeptio_ptrack_v2";
+const LS_REV = "adeptio_ptrack_rev";
 let MEM = null, DB = null;
 function safeGet(){ try{ return localStorage.getItem(LS_KEY); }catch(e){ return null; } }
 function safeSet(v){ try{ localStorage.setItem(LS_KEY,v); return true; }catch(e){ return false; } }
+
+/* ---- Cloud sync config (optional). Point API_BASE at your Cloudflare Worker to
+   enable shared, cross-device persistence + server/drive backups. Leave empty and
+   the app runs purely on localStorage (offline). API_TOKEN must match the Worker. */
+const API_BASE  = "";          // e.g. "https://adeptio-gantt.<your-subdomain>.workers.dev"
+const API_TOKEN = "";          // must equal the Worker's API_TOKEN secret (if it sets one)
+const WORKSPACE = "default";
+const cloudOn = () => !!API_BASE;
+function apiUrl(path){ const sep = path.includes("?") ? "&" : "?"; return API_BASE.replace(/\/$/,"") + path + sep + "ws=" + encodeURIComponent(WORKSPACE); }
+function apiHeaders(extra){ const h = { "content-type":"application/json", ...(extra||{}) }; if(API_TOKEN) h["authorization"] = "Bearer " + API_TOKEN; return h; }
+function lsRev(){ try{ return (+(localStorage.getItem(LS_REV)||0))||0; }catch(e){ return 0; } }
+function setLsRev(r){ try{ localStorage.setItem(LS_REV, String(r)); }catch(e){} }
+
 const Store = {
   load(){
     const raw = safeGet();
@@ -89,9 +105,55 @@ const Store = {
     if(!DB){ DB = MEM || seedDB(); }
     MEM = DB; return DB;
   },
-  save(){ const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; } }
+  save(){ const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; } if(cloudOn()) schedulePush(); }
 };
 function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
+
+/* ---- cloud sync engine: local-first; the Worker's `rev` is the tiebreaker ---- */
+let pushTimer=null, pushPending=false;
+function schedulePush(){ pushPending=true; clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, 800); }
+async function cloudPush(){
+  if(!cloudOn()) return;
+  try{
+    const res = await fetch(apiUrl("/api/state"), { method:"PUT", headers:apiHeaders(), body:JSON.stringify({doc:DB}) });
+    if(res.ok){ const j=await res.json(); if(j && typeof j.rev==="number") setLsRev(j.rev); pushPending=false; }
+  }catch(e){ /* offline → localStorage holds the change; retried on next save */ }
+}
+function editingNow(){
+  const a=document.activeElement;
+  if(a && (a.tagName==="TEXTAREA" || a.tagName==="INPUT" || a.isContentEditable)) return true;
+  if(el("modalRoot") && el("modalRoot").style.display==="block") return true;
+  if(el("historyOverlay") && el("historyOverlay").style.display==="flex") return true;
+  return false;
+}
+function adoptRemote(doc, rev){ DB=doc; MEM=DB; safeSet(JSON.stringify(DB)); setLsRev(rev); route(); }
+async function cloudPull(force){
+  if(!cloudOn()) return false;
+  try{
+    const res = await fetch(apiUrl("/api/state"), { headers:apiHeaders() });
+    if(!res.ok) return false;
+    const j = await res.json();
+    if(j && j.doc && typeof j.rev==="number"){
+      if(force || (j.rev > lsRev() && !pushPending && !editingNow())){ adoptRemote(j.doc, j.rev); return true; }
+    }
+    return false;
+  }catch(e){ return false; }
+}
+async function cloudSync(){
+  if(!cloudOn()) return;
+  try{
+    const res = await fetch(apiUrl("/api/state"), { headers:apiHeaders() });
+    if(res.ok){
+      const j = await res.json();
+      if(j && j.doc){                                  // server already has data
+        if(j.rev > lsRev() || !safeGet()){ adoptRemote(j.doc, j.rev); toast("ซิงก์ข้อมูลจากคลาวด์แล้ว"); }
+        else cloudPush();                              // local is ahead/equal → push up
+      } else {
+        cloudPush();                                   // server empty → seed it from local
+      }
+    }
+  }catch(e){ /* offline → localStorage only */ }
+}
 
 /* =====================  SEED DATA  ===================== */
 function mkFeat(fid,nm,desc,s,e,status,rmk,owner){ return {id:nid(),fid,name:nm,description:desc,start:s,end:e,status:status||"not_started",remark:rmk||"",custom:owner!==undefined?{owner}:{}}; }
@@ -279,6 +341,8 @@ function renderDashboard(){
         <div class="dashBarRow">
           <button class="btn primary" id="btnNewProj">${IC.plus}<span>โครงการใหม่</span></button>
           <span class="count">${ps.length} โครงการ</span>
+          <span class="grow"></span>
+          <button class="btn" id="btnBackup">${IC.cloud}<span>สำรอง / กู้คืนข้อมูล</span></button>
         </div>
         <div class="grid">
           ${cards}
@@ -289,6 +353,7 @@ function renderDashboard(){
 
   el("btnNewProj").onclick = ()=>projectModal();
   el("btnNewProj2").onclick = ()=>projectModal();
+  el("btnBackup").onclick = ()=>backupModal();
   document.querySelectorAll('.card[data-open]').forEach(c=>{
     c.addEventListener('click', e=>{ if(e.target.closest('[data-act]')) return; openProjectWindow(c.dataset.open); });
   });
@@ -1017,11 +1082,104 @@ function closeModal(){ const r=el("modalRoot"); if(r){ r.style.display="none"; r
 let toastT;
 function toast(m){ const t=el("toast"); t.textContent=m; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),2400); }
 
+/* =====================  BACKUP / RESTORE  ===================== */
+function downloadBackupFile(){
+  const blob = new Blob([JSON.stringify(DB,null,2)], {type:"application/json"});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = "adeptio-gantt-backup-" + iso(today()) + ".json"; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 3000); toast("ดาวน์โหลดไฟล์สำรองแล้ว");
+}
+function restoreFromObject(obj, label){
+  if(!obj || !Array.isArray(obj.projects)){ toast("ไฟล์สำรองไม่ถูกต้อง"); return; }
+  if(!confirm("กู้คืนข้อมูล" + (label?(" จาก"+label):"") + "? ข้อมูลปัจจุบันทั้งหมดจะถูกแทนที่")) return;
+  DB = obj; MEM = DB; Store.save();      // persists locally + pushes to cloud if enabled
+  PID = null; closeModal(); location.hash = ""; route(); toast("กู้คืนข้อมูลเรียบร้อย");
+}
+function restoreBackupFile(file){
+  const r = new FileReader();
+  r.onload = e=>{ try{ restoreFromObject(JSON.parse(e.target.result), "ไฟล์"); }catch(err){ toast("อ่านไฟล์ไม่สำเร็จ"); } };
+  r.readAsText(file);
+}
+function fmtTs(ts){ try{ return new Date(ts).toLocaleString(); }catch(e){ return ts; } }
+
+async function backupModal(){
+  const cloud = cloudOn();
+  openModal(`
+    <h2>สำรอง / กู้คืนข้อมูล</h2>
+    <div class="msub">Backup &amp; Restore — ${cloud?"เชื่อมต่อคลาวด์ (Cloudflare) แล้ว":"โหมดไฟล์ · ยังไม่ได้ตั้งค่าคลาวด์"}</div>
+
+    <div class="bkSection">
+      <div class="bkHd">สำรองข้อมูล</div>
+      <div class="bkRow">
+        <button class="btn sm" id="bk_download">${IC.exp}<span>ดาวน์โหลดไฟล์สำรอง (.json)</span></button>
+        ${cloud?`<button class="btn sm primary" id="bk_now">${IC.cloud}<span>สำรองขึ้นคลาวด์ + ไดรฟ์ตอนนี้</span></button>`:""}
+      </div>
+      <div class="bkHint">บันทึกไฟล์ .json ไว้บน Google Drive / Dropbox / OneDrive ได้ด้วยตนเอง${cloud?" · หรือให้เซิร์ฟเวอร์อัปโหลดอัตโนมัติ (รายวัน/รายสัปดาห์)":""}</div>
+    </div>
+
+    <div class="bkSection">
+      <div class="bkHd">กู้คืนข้อมูล</div>
+      <div class="bkRow">
+        <button class="btn sm" id="bk_pick">${IC.imp}<span>กู้คืนจากไฟล์ (.json)</span></button>
+        ${cloud?`<button class="btn sm" id="bk_remote">${IC.restore}<span>กู้คืนไฟล์ล่าสุดจากไดรฟ์</span></button>`:""}
+        <input type="file" id="bk_file" accept="application/json,.json" style="display:none"/>
+      </div>
+      ${cloud
+        ? `<div class="bkHd2">ประวัติสำรองบนเซิร์ฟเวอร์</div><div id="bk_list" class="bkList"><div class="bkEmpty">กำลังโหลด…</div></div>`
+        : `<div class="bkHint">ตั้งค่า <b>API_BASE</b> ใน app.js ให้ชี้ไปที่ Cloudflare Worker เพื่อเปิดการสำรองอัตโนมัติและการกู้คืนจากไดรฟ์</div>`}
+    </div>
+
+    <div class="modActsRow"><button class="btn" data-act="cancel">ปิด</button></div>`);
+
+  el("bk_download").onclick = downloadBackupFile;
+  el("bk_pick").onclick = ()=> el("bk_file").click();
+  el("bk_file").onchange = e=>{ const f=e.target.files[0]; if(f) restoreBackupFile(f); };
+
+  if(cloud){
+    el("bk_now").onclick = async ()=>{
+      el("bk_now").disabled = true; toast("กำลังสำรองข้อมูล…");
+      try{
+        await cloudPush();
+        const res = await fetch(apiUrl("/api/backups?period=manual"), { method:"POST", headers:apiHeaders() });
+        const j = res.ok ? await res.json() : null;
+        if(j){ const r=j.remote||{}; const ok=Object.keys(r).filter(k=>r[k]==="ok"); toast("สำรองแล้ว"+(ok.length?(" → "+ok.join(", ")):" (เซิร์ฟเวอร์)")); }
+        else toast("สำรองไม่สำเร็จ");
+      }catch(e){ toast("สำรองไม่สำเร็จ"); }
+      backupModal();
+    };
+    el("bk_remote").onclick = async ()=>{
+      if(!confirm("กู้คืนจากไฟล์ล่าสุดบนไดรฟ์? ข้อมูลปัจจุบันจะถูกแทนที่")) return;
+      toast("กำลังกู้คืนจากไดรฟ์…");
+      try{
+        const res = await fetch(apiUrl("/api/restore-remote"), { method:"POST", headers:apiHeaders() });
+        if(res.ok){ await cloudPull(true); closeModal(); toast("กู้คืนจากไดรฟ์แล้ว"); }
+        else toast("กู้คืนไม่สำเร็จ · ไม่พบไฟล์หรือยังไม่ได้ตั้งค่าผู้ให้บริการ");
+      }catch(e){ toast("กู้คืนไม่สำเร็จ"); }
+    };
+    try{
+      const res = await fetch(apiUrl("/api/backups"), { headers:apiHeaders() });
+      const rows = res.ok ? await res.json() : [];
+      const box = el("bk_list");
+      if(box){
+        box.innerHTML = rows.length
+          ? rows.map(b=>`<div class="bkItem"><span class="bkMeta"><b>${esc(b.period)}</b> · ${esc(fmtTs(b.ts))}</span><span class="grow"></span><button class="btn sm" data-bid="${esc(b.id)}">กู้คืน</button></div>`).join("")
+          : `<div class="bkEmpty">ยังไม่มีการสำรองบนเซิร์ฟเวอร์</div>`;
+        box.querySelectorAll('[data-bid]').forEach(btn=> btn.onclick = async ()=>{
+          if(!confirm("กู้คืนข้อมูลจากสำรองนี้? ข้อมูลปัจจุบันจะถูกแทนที่")) return;
+          const r2 = await fetch(apiUrl("/api/restore?id="+encodeURIComponent(btn.dataset.bid)), { method:"POST", headers:apiHeaders() });
+          if(r2.ok){ await cloudPull(true); closeModal(); toast("กู้คืนแล้ว"); } else toast("กู้คืนไม่สำเร็จ");
+        });
+      }
+    }catch(e){ const box=el("bk_list"); if(box) box.innerHTML = `<div class="bkEmpty">โหลดประวัติไม่สำเร็จ</div>`; }
+  }
+}
+
 /* =====================  INIT  ===================== */
 Store.load();
 route();
 window.addEventListener('hashchange', route);
 window.addEventListener('storage', e=>{ if(e.key===LS_KEY){ Store.load(); route(); } });
+if(cloudOn()){ cloudSync(); window.addEventListener('focus', ()=>cloudPull(false)); setInterval(()=>cloudPull(false), 30000); }
 document.addEventListener('keydown', e=>{
   if(e.key==="Escape"){
     if(el("modalRoot").style.display==="block") closeModal();

@@ -1,0 +1,32 @@
+name = "adeptio-gantt"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# --- D1 binding (the Worker reads it as env.DB) ---
+# Create with:  npx wrangler d1 create adeptio-gantt
+# then paste the printed database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "adeptio-gantt"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# --- Scheduled backups ---
+# Daily 18:00 UTC (01:00 Bangkok) and weekly Sunday 18:30 UTC.
+# The Worker treats the Sunday schedule as the "weekly" snapshot.
+[triggers]
+crons = ["0 18 * * *", "30 18 * * 0"]
+
+# Non-secret var so scheduled() can label the weekly run explicitly.
+[vars]
+WEEKLY_CRON = "30 18 * * 0"
+
+# --- Secrets (set with `npx wrangler secret put <NAME>`; never commit them) ---
+#   API_TOKEN                 shared bearer token (must match API_TOKEN in app.js)
+#   Dropbox (simplest):
+#     DROPBOX_TOKEN           a Dropbox access token
+#     -- or refresh-token trio:
+#     DROPBOX_REFRESH_TOKEN / DROPBOX_CLIENT_ID / DROPBOX_CLIENT_SECRET
+#   Google Drive:
+#     GDRIVE_REFRESH_TOKEN / GDRIVE_CLIENT_ID / GDRIVE_CLIENT_SECRET
+#   OneDrive (Microsoft Graph):
+#     ONEDRIVE_REFRESH_TOKEN / ONEDRIVE_CLIENT_ID / ONEDRIVE_CLIENT_SECRET
