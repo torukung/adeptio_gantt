@@ -267,7 +267,7 @@ async function uploadRemotes(env, content) {
 }
 async function downloadRemoteLatest(env, prefer) {
   let list = providers(env).filter((p) => p.on);
-  if (prefer) list = list.sort((a) => (a.key === prefer ? -1 : 1));
+  if (prefer) list = list.sort((a, b) => (a.key === prefer ? 0 : 1) - (b.key === prefer ? 0 : 1));
   for (const p of list) {
     try {
       const txt = await p.down(env);
