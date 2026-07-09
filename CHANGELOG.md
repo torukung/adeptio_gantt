@@ -36,6 +36,27 @@ Timeline & table polish (tuning pass), plus a read-only preview build.
   to `worker.js`, `schema.sql`, `wrangler.toml`, the D1 database, or user
   content.
 
+### Round 2 (same day, after review)
+Same-day follow-up fixes from user feedback on the tuning pass above.
+
+- **Fixed duplicate tooltip** — module-description rows (`.modDesc`) still carried a
+  native `title` attribute alongside the dark `.floatTip`, so a truncated description
+  showed both the gray browser tooltip and the floating one at once; the column-header
+  drag hint had the same issue. Both now use `data-tip` and route through the shared
+  floatTip, which gained a singleton guard (reuses/removes any existing `.floatTip`
+  node) so only one can ever be on screen.
+- **Wrap Txt toggle relocated** — moved off the Timeline toolbar and onto a compact
+  icon button on the Description column header itself (styled like the other header
+  controls, shows an "on" state when active); the toolbar seg button was removed.
+  Setting still persists to `localStorage` (`adeptio_ptrack_ui`) as before. In the
+  preview build, the "PREVIEW · read-only" ribbon moved to the bottom-right so it no
+  longer covers the toolbar.
+- **All left-table columns are now drag-resizable** — a small handle on each header's
+  right edge resizes that column (min 60px / max 640px); with Wrap Txt on, row heights
+  and the matching Gantt bar rows follow the content live during the drag. Widths
+  persist locally under `adeptio_ptrack_ui` → `colW` — browser `localStorage` only,
+  never written to the cloud document/database. Column drag-to-reorder is unchanged.
+
 ---
 
 ## [2.3.0] — 2026-06-21
