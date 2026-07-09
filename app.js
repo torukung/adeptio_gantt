@@ -50,9 +50,9 @@ function startOfMonth(d){ return new Date(d.getFullYear(),d.getMonth(),1); }
 function endOfMonth(d){ return new Date(d.getFullYear(),d.getMonth()+1,0); }
 function today(){ const t=new Date(); return new Date(t.getFullYear(),t.getMonth(),t.getDate()); }
 const LS_UI = "adeptio_ptrack_ui";
-const ui = { zoom:"week", cal:"CE", wrapTxt:false };
-try{ const _u=JSON.parse(localStorage.getItem(LS_UI)||"{}"); if(_u && typeof _u==="object" && "wrapTxt" in _u) ui.wrapTxt=!!_u.wrapTxt; }catch(e){}
-function saveUi(){ try{ localStorage.setItem(LS_UI, JSON.stringify({wrapTxt:!!ui.wrapTxt})); }catch(e){} }
+const ui = { zoom:"week", cal:"CE", wrapTxt:false, colW:{} };
+try{ const _u=JSON.parse(localStorage.getItem(LS_UI)||"{}"); if(_u && typeof _u==="object"){ if("wrapTxt" in _u) ui.wrapTxt=!!_u.wrapTxt; if(_u.colW && typeof _u.colW==="object") ui.colW=_u.colW; } }catch(e){}
+function saveUi(){ try{ localStorage.setItem(LS_UI, JSON.stringify({wrapTxt:!!ui.wrapTxt, colW:ui.colW||{}})); }catch(e){} }
 function dispYear(d){ return ui.cal==="BE" ? d.getFullYear()+543 : d.getFullYear(); }
 function monName(mi){ return ui.cal==="BE" ? TH_MON[mi] : EN_MON[mi]; }
 function fmtThai(d){ return d.getDate()+" "+monName(d.getMonth())+" "+String(dispYear(d)).slice(-2); }
@@ -81,6 +81,7 @@ const IC = {
   cloud: ic('<path d="M7 18a4 4 0 01-.5-7.97 5.5 5.5 0 0110.55-1.3A4 4 0 0117.5 18H7z"/>'),
   restore: ic('<path d="M3 12a9 9 0 109-9 9 9 0 00-7 3.3M3 4v3.5h3.5"/><path d="M12 8v4l3 2"/>'),
   link:  ic('<path d="M9 15l6-6M10.5 6.5l1-1a4 4 0 015.95 5.3l-1.2 1.2M13.5 17.5l-1 1a4 4 0 01-5.95-5.3l1.2-1.2"/>'),
+  wrap:  ic('<path d="M3 6h18"/><path d="M3 12h15a3 3 0 010 6h-4"/><path d="M17 15l-3 3 3 3"/><path d="M3 18h6"/>'),
 };
 
 /* =====================  STORE (local-first, optional cloud sync)  ===== */
@@ -438,7 +439,6 @@ function renderProject(){
       <div class="toolgroup tlOnly">
         <div class="seg"><span class="lbl">Zoom</span><button data-zoom="day">Day</button><button data-zoom="week" class="on">Week</button><button data-zoom="month">Month</button></div>
         <div class="seg"><button data-cal="CE" class="on">ค.ศ.</button><button data-cal="BE">พ.ศ.</button></div>
-        <div class="seg"><button id="btnWrap" class="${ui.wrapTxt?'on':''}" title="ตัดข้อความในคอลัมน์ Feature และ Description ให้ขึ้นบรรทัดใหม่">Wrap Txt</button></div>
         <button class="btn sm" id="btnToday">Today</button>
       </div>
       <div class="toolgroup">
@@ -518,7 +518,6 @@ function wireProjectControls(){
   document.querySelectorAll('.tabBtn').forEach(b=> b.onclick=()=> switchTab(b.dataset.tab));
   document.querySelectorAll('[data-zoom]').forEach(b=>b.onclick=()=>{ ui.zoom=b.dataset.zoom; document.querySelectorAll('[data-zoom]').forEach(x=>x.classList.toggle('on',x===b)); renderTimeline(); });
   document.querySelectorAll('[data-cal]').forEach(b=>b.onclick=()=>{ ui.cal=b.dataset.cal; document.querySelectorAll('[data-cal]').forEach(x=>x.classList.toggle('on',x===b)); updateMeta(); if(ui.tab==="timeline") renderTimeline(); });
-  const wb=el("btnWrap"); if(wb) wb.onclick=()=>{ ui.wrapTxt=!ui.wrapTxt; wb.classList.toggle('on', ui.wrapTxt); saveUi(); hideTip(); if(ui.tab==="timeline") applyWrap(); };
   el("btnToday").onclick = ()=>{ const R=el("rightScroll"); if(!R) return; const r=getRange(), t=today(); if(t<r.start||t>r.end){ toast("วันนี้อยู่นอกช่วงของแผน"); return;} const x=daysBetween(r.start,t)*pxPerDay(); R.scrollTo({left:Math.max(0,x-R.clientWidth/2),behavior:'smooth'}); };
   el("colLeft").onclick = ()=>{ const e2=el("leftScroll"); if(e2) e2.scrollBy({left:-220,behavior:'smooth'}); };
   el("colRight").onclick = ()=>{ const e2=el("leftScroll"); if(e2) e2.scrollBy({left:220,behavior:'smooth'}); };
@@ -734,8 +733,12 @@ function allCols(){
   order = order.filter(k=>valid.has(k));
   P.colOrder = order;
   return order.map(k=>{
-    if(k.startsWith("c:")){ const c=P.customCols.find(x=>("c:"+x.id)===k); return {key:k,label:c.label,w:c.w,kind:c.kind,custom:c.id,del:true}; }
-    return {...BASE_COLDEFS[k]};
+    let c;
+    if(k.startsWith("c:")){ const cc=P.customCols.find(x=>("c:"+x.id)===k); c={key:k,label:cc.label,w:cc.w,kind:cc.kind,custom:cc.id,del:true}; }
+    else c={...BASE_COLDEFS[k]};
+    // local-only width override (ui.colW) — never written back to the doc/customCols
+    if(ui.colW && ui.colW[k]!=null){ const ov=+ui.colW[k]; if(!isNaN(ov)) c.w=Math.max(60,Math.min(640,ov)); }
+    return c;
   });
 }
 const PX = { day:38, week:11, month:4.4 };
@@ -756,7 +759,11 @@ function renderBoard(){ renderGrid(); renderTimeline(); updateMeta(); if(el("pro
 
 function renderGrid(){
   const P=proj(), cols=allCols();
-  el("leftHead").innerHTML = cols.map(c=>`<div class="colHead" data-key="${c.key}" style="width:${c.w}px" title="ลากเพื่อย้ายคอลัมน์">${esc(c.label)}${c.del?`<button class="delcol" data-act="delcol" data-col="${c.custom}" title="ลบคอลัมน์">${IC.x}</button>`:""}</div>`).join("");
+  el("leftHead").innerHTML = cols.map(c=>{
+    const wrapBtn = c.key==="description" ? `<button class="colTool wrapToggle ${ui.wrapTxt?'on':''}" data-act="wraptoggle" data-tip="ตัดข้อความ (Wrap) — คลิกเพื่อสลับ">${IC.wrap}</button>` : "";
+    const delBtn = c.del ? `<button class="delcol" data-act="delcol" data-col="${c.custom}" title="ลบคอลัมน์">${IC.x}</button>` : "";
+    return `<div class="colHead${c.key==="description"?" hasTool":""}${c.del?" hasDel":""}" data-key="${c.key}" style="width:${c.w}px" data-tip="ลากเพื่อย้ายคอลัมน์ · ลากขอบขวาเพื่อปรับความกว้าง"><span class="colLabel">${esc(c.label)}</span>${wrapBtn}${delBtn}<span class="colResize" data-act="colresize" data-tip="ลากเพื่อปรับความกว้างคอลัมน์"></span></div>`;
+  }).join("");
   const gw = cols.reduce((a,c)=>a+c.w,0);
   let html="";
   P.modules.forEach((m,mi)=>{
@@ -764,7 +771,7 @@ function renderGrid(){
     html += `<div class="modRow ${m.collapsed?'collapsed':''}" style="width:${gw}px" data-mi="${mi}">
       <span class="caret" data-act="toggle">${IC.caret}</span>
       <span class="chip" style="background:${p.chip}"></span>
-      <span class="modText"><span class="modName" contenteditable="true" data-field="modname" spellcheck="false">${esc(m.name)}</span>${m.description?`<span class="modDesc" title="${esc(m.description)}">${esc(m.description)}</span>`:""}</span>
+      <span class="modText"><span class="modName" contenteditable="true" data-field="modname" spellcheck="false">${esc(m.name)}</span>${m.description?`<span class="modDesc" data-tip="${esc(m.description)}">${esc(m.description)}</span>`:""}</span>
       <span class="count">${m.features.length}</span>
       <span class="modActs">
         <button class="iconbtn" data-act="editmod" title="แก้ไขโมดูล">${IC.edit}</button>
@@ -878,7 +885,14 @@ function syncRowHeights(){
 
 /* =====================  FLOATING TOOLTIP (shared)  ===================== */
 let _tipEl=null;
-function tipEl(){ if(!_tipEl){ _tipEl=document.createElement('div'); _tipEl.className='floatTip'; document.body.appendChild(_tipEl); } return _tipEl; }
+function tipEl(){
+  // Reuse any existing .floatTip already in the DOM and strip out duplicates so
+  // exactly ONE dark floatTip node ever exists (guards against stray/second nodes).
+  const existing=document.querySelectorAll('.floatTip');
+  if(existing.length){ _tipEl=existing[0]; for(let i=1;i<existing.length;i++) existing[i].remove(); }
+  if(!_tipEl || !_tipEl.isConnected){ _tipEl=document.createElement('div'); _tipEl.className='floatTip'; document.body.appendChild(_tipEl); }
+  return _tipEl;
+}
 function showTip(text,x,y){ const t=tipEl(); t.textContent=text; t.style.display='block'; positionTip(x,y); }
 function positionTip(x,y){ const t=_tipEl; if(!t) return; const pad=14, w=t.offsetWidth, h=t.offsetHeight; let tx=x+pad, ty=y+pad; if(tx+w>innerWidth-8) tx=x-w-pad; if(ty+h>innerHeight-8) ty=y-h-pad; t.style.left=Math.max(6,tx)+'px'; t.style.top=Math.max(6,ty)+'px'; }
 function hideTip(){ if(_tipEl) _tipEl.style.display='none'; }
@@ -891,6 +905,18 @@ function onBoardOver(e){
     const cell = txt.closest('.cell');
     const isTarget = cell.classList.contains('feat') || txt.dataset.field==='description';
     if(isTarget && document.activeElement!==txt && (txt.scrollWidth - txt.clientWidth) > 1){ showTip(cellTipText(txt), e.clientX, e.clientY); } else hideTip();
+    return;
+  }
+  // module description row — floatTip on truncation (replaces the old native title)
+  const md = t.closest && t.closest('.modDesc');
+  if(md){ if(document.activeElement!==md && (md.scrollWidth - md.clientWidth) > 1){ showTip((md.getAttribute('data-tip')||md.textContent||'').trim(), e.clientX, e.clientY); } else hideTip(); return; }
+  // column header + its controls — floatTip from data-tip (replaces the old native title)
+  const ch = t.closest && t.closest('.colHead');
+  if(ch){
+    const inner = (t.closest && (t.closest('.colTool')||t.closest('.colResize')));
+    const src = inner || (t.closest('.delcol') ? null : ch);
+    const tip = src && src.getAttribute('data-tip');
+    if(tip){ showTip(tip, e.clientX, e.clientY); } else hideTip();
     return;
   }
   hideTip();
@@ -914,6 +940,8 @@ function bindGrid(){
   const lh=el("leftHead");
   lh.querySelectorAll('[data-act="delcol"]').forEach(b=> b.addEventListener('click', onGridAction));
   lh.querySelectorAll('.colHead').forEach(h=> h.addEventListener('pointerdown', onColDragStart));
+  lh.querySelectorAll('.colResize').forEach(h=> h.addEventListener('pointerdown', onColResizeStart));
+  lh.querySelectorAll('.wrapToggle').forEach(b=>{ b.addEventListener('pointerdown', e=>e.stopPropagation()); b.addEventListener('click', onWrapToggle); });
 }
 function onTextBlur(e){
   const x=e.target, field=x.dataset.field, P=proj();
@@ -1000,19 +1028,63 @@ function moduleModal(mi){
   const P=proj(), editing=(mi!=null)?P.modules[mi]:null;
   let color=editing?editing.color:(P.modules.length%PALETTE.length);
   const sw=PALETTE.map((p,i)=>`<div class="swatch ${i===color?'on':''}" data-c="${i}" style="background:${p.chip}"></div>`).join("");
+  /* create-mode only: optional picker to MOVE existing features (from other modules) into the new module */
+  let pickerHtml="";
+  if(!editing){
+    const totalFeats=P.modules.reduce((a,m)=>a+m.features.length,0);
+    if(totalFeats===0){
+      pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpEmpty">ยังไม่มีฟีเจอร์ให้ย้าย — สร้างฟีเจอร์ในโมดูลอื่นก่อน</div></div>`;
+    }else{
+      const groups=P.modules.map(m=>{
+        if(!m.features.length) return "";
+        const p=PALETTE[m.color%PALETTE.length];
+        const rows=m.features.map(f=>`<label class="mpFeat"><input type="checkbox" class="mpChk" data-featid="${esc(f.id)}"/>${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}<span class="mpFeatName">${esc(f.name)}</span></label>`).join("");
+        return `<div class="mpGroup"><label class="mpHead"><input type="checkbox" class="mpAll"/><span class="chip" style="background:${p.chip}"></span><span class="mpModName">${esc(m.name)}</span><span class="count">${m.features.length}</span></label>${rows}</div>`;
+      }).join("");
+      pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpList" id="mm_pick">${groups}</div><div class="mpCounter" id="mm_pickCount">เลือกแล้ว 0 ฟีเจอร์</div></div>`;
+    }
+  }
   openModal(`
     <h2>${editing?"แก้ไขโมดูล":"สร้างโมดูล"}</h2>
     <div class="msub">โมดูลคือกลุ่มของฟีเจอร์ในแผนงาน</div>
     <div class="field"><label>ชื่อโมดูล · Module name</label><input type="text" id="mm_name" value="${editing?esc(editing.name):""}" placeholder="เช่น Procurement P2P (Section B)"/></div>
     <div class="field"><label>คำอธิบายสั้น · Short description</label><textarea id="mm_desc" placeholder="อธิบายสั้น ๆ เช่น 43 features — PR, PO, GR, Reports">${editing?esc(editing.description||""):""}</textarea></div>
     <div class="field"><label>สี · Colour</label><div class="swatches" id="mm_sw">${sw}</div></div>
+    ${pickerHtml}
     <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="mm_save">${editing?"บันทึก":"สร้างโมดูล"}</button></div>`);
   el("modalRoot").querySelectorAll('#mm_sw .swatch').forEach(s=> s.onclick=()=>{ color=+s.dataset.c; el("modalRoot").querySelectorAll('#mm_sw .swatch').forEach(x=>x.classList.toggle('on',x===s)); });
+  const pick=el("mm_pick");
+  if(pick){
+    const updateCount=()=>{
+      pick.querySelectorAll('.mpGroup').forEach(g=>{
+        const all=g.querySelector('.mpAll'), chks=g.querySelectorAll('.mpChk'), on=g.querySelectorAll('.mpChk:checked').length;
+        if(all){ all.checked = on>0 && on===chks.length; all.indeterminate = on>0 && on<chks.length; }
+      });
+      const n=pick.querySelectorAll('.mpChk:checked').length;
+      el("mm_pickCount").textContent=`เลือกแล้ว ${n} ฟีเจอร์`;
+    };
+    pick.querySelectorAll('.mpAll').forEach(a=> a.addEventListener('change', ()=>{ const g=a.closest('.mpGroup'); g.querySelectorAll('.mpChk').forEach(c=> c.checked=a.checked); updateCount(); }));
+    pick.querySelectorAll('.mpChk').forEach(c=> c.addEventListener('change', updateCount));
+    updateCount();
+  }
   el("mm_save").onclick=()=>{
     const name=el("mm_name").value.trim()||"โมดูลใหม่", desc=el("mm_desc").value.trim();
-    if(editing){ editing.name=name; editing.description=desc; editing.color=color; }
-    else P.modules.push({id:nid(),name,description:desc,color,collapsed:false,features:[]});
-    Store.save(); closeModal(); renderBoard(); toast(editing?"บันทึกโมดูลแล้ว":"สร้างโมดูลแล้ว");
+    if(editing){ editing.name=name; editing.description=desc; editing.color=color; Store.save(); closeModal(); renderBoard(); toast("บันทึกโมดูลแล้ว"); return; }
+    const newMod={id:nid(),name,description:desc,color,collapsed:false,features:[]};
+    P.modules.push(newMod);
+    let moved=0;
+    if(pick){
+      const selIds=Array.from(pick.querySelectorAll('.mpChk:checked')).map(c=>c.dataset.featid); // collect ids first (remove by id, not index)
+      selIds.forEach(fid=>{
+        for(const m of P.modules){
+          if(m===newMod) continue;
+          const idx=m.features.findIndex(f=>f.id===fid);
+          if(idx>=0){ newMod.features.push(m.features.splice(idx,1)[0]); moved++; break; } // preserve object ref + source order
+        }
+      });
+    }
+    Store.save(); closeModal(); renderBoard();
+    toast(moved>0 ? `สร้างโมดูลแล้ว · ย้าย ${moved} ฟีเจอร์เข้าโมดูล` : "สร้างโมดูลแล้ว");
   };
 }
 
@@ -1103,7 +1175,7 @@ function moveFeature(smi,sfi,tmi,tfi,before){
 let colDrag=null;
 function clearColMark(){ document.querySelectorAll('.colHead.insL,.colHead.insR').forEach(x=>x.classList.remove('insL','insR')); }
 function onColDragStart(e){
-  if(e.target.closest('.delcol')) return;
+  if(e.target.closest('.delcol')||e.target.closest('.colResize')||e.target.closest('.colTool')) return;
   const head=e.currentTarget; if(!head.dataset.key) return;
   colDrag={ key:head.dataset.key, head, target:null, ghost:null, startX:e.clientX, moved:false };
   document.body.style.userSelect='none';
@@ -1134,6 +1206,45 @@ function moveColumn(srcKey, tgtKey, before){
   const si=order.indexOf(srcKey); if(si<0) return; order.splice(si,1);
   let ti=order.indexOf(tgtKey); if(ti<0) return; if(!before) ti+=1;
   order.splice(ti,0,srcKey); P.colOrder=order; Store.save(); renderBoard();
+}
+
+/* =====================  COLUMN RESIZE (local-only widths)  ===================== */
+/* Widths live in ui.colW (localStorage) only — never written to proj()/customCols/doc. */
+let colResize=null;
+function onColResizeStart(e){
+  e.stopPropagation(); e.preventDefault();           // don't let the header start a reorder drag
+  const head=e.target.closest('.colHead'); if(!head||!head.dataset.key) return;
+  const lh=el("leftHead"); const idx=[...lh.children].indexOf(head);
+  colResize={ key:head.dataset.key, head, idx, handle:e.target, startX:e.clientX, startW:head.getBoundingClientRect().width, w:0 };
+  e.target.classList.add('dragging');
+  document.body.style.userSelect='none'; document.body.style.cursor='col-resize'; hideTip();
+  window.addEventListener('pointermove', onColResizeMove); window.addEventListener('pointerup', onColResizeUp, {once:true});
+}
+function onColResizeMove(e){
+  if(!colResize) return;
+  let w=Math.round(colResize.startW + (e.clientX-colResize.startX));
+  w=Math.max(60, Math.min(640, w)); colResize.w=w;
+  colResize.head.style.width=w+'px';                 // live: header
+  const lb=el("leftBody");
+  lb.querySelectorAll('.featRow').forEach(fr=>{ const cell=fr.children[colResize.idx]; if(cell) cell.style.width=w+'px'; }); // live: every cell in this column
+  const total=[...el("leftHead").children].reduce((a,h)=>a+h.getBoundingClientRect().width,0);
+  lb.querySelectorAll('.modRow').forEach(r=> r.style.width=total+'px'); // keep module bands spanning full width
+  if(ui.wrapTxt) syncRowHeights();                   // content-driven row height follows the new width live
+}
+function onColResizeUp(){
+  if(!colResize) return; window.removeEventListener('pointermove', onColResizeMove);
+  document.body.style.userSelect=''; document.body.style.cursor='';
+  if(colResize.handle) colResize.handle.classList.remove('dragging');
+  const w=colResize.w || Math.round(colResize.head.getBoundingClientRect().width);
+  if(w){ ui.colW=ui.colW||{}; ui.colW[colResize.key]=w; saveUi(); }
+  colResize=null;
+  renderGrid(); renderTimeline(); applyWrap();        // settle: re-render both panes and re-sync heights
+}
+function onWrapToggle(e){
+  e.stopPropagation();
+  ui.wrapTxt=!ui.wrapTxt; saveUi(); hideTip();
+  const b=e.currentTarget; if(b) b.classList.toggle('on', ui.wrapTxt);
+  applyWrap();
 }
 
 /* =====================  EXCEL EXPORT / IMPORT  ===================== */

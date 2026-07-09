@@ -198,10 +198,21 @@ button{font-family:inherit; cursor:pointer;}
 #leftHead{display:flex; min-width:max-content;}
 .colHead{flex:0 0 auto; height:var(--headH); display:flex; align-items:center; padding:0 10px; color:var(--ink-soft); border-right:1px solid var(--line); text-transform:uppercase; font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; position:relative; cursor:grab;}
 .colHead:active{cursor:grabbing;}
-.colHead .delcol{position:absolute; right:3px; top:50%; transform:translateY(-50%); width:18px; height:18px; border-radius:6px; border:0; background:transparent; color:var(--ink-faint); display:none; align-items:center; justify-content:center; cursor:pointer;}
+.colHead .colLabel{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1 1 auto; min-width:0;}
+.colHead.hasTool,.colHead.hasDel{padding-right:32px;}
+.colHead .delcol{position:absolute; right:11px; top:50%; transform:translateY(-50%); width:18px; height:18px; border-radius:6px; border:0; background:transparent; color:var(--ink-faint); display:none; align-items:center; justify-content:center; cursor:pointer; z-index:3;}
 .colHead:hover .delcol{display:flex;}
 .colHead .delcol:hover{background:#f3dada; color:#c0392b;}
 .colHead .delcol svg{width:11px; height:11px;}
+/* Description-header wrap toggle (small square button, matches header controls) */
+.colHead .colTool{position:absolute; right:11px; top:50%; transform:translateY(-50%); width:20px; height:20px; padding:0; border-radius:6px; border:1px solid var(--line-strong); background:#fff; color:var(--ink-faint); display:flex; align-items:center; justify-content:center; cursor:pointer; transition:.15s var(--ease); z-index:3;}
+.colHead .colTool svg{width:12px; height:12px;}
+.colHead .colTool:hover{color:var(--violet-adpt); border-color:var(--violet-adpt);}
+.colHead .colTool.on{background:var(--violet-adpt); border-color:var(--violet-adpt); color:#fff;}
+/* Right-edge column resize zone (every column) */
+.colHead .colResize{position:absolute; right:0; top:0; height:100%; width:7px; cursor:col-resize; z-index:5; touch-action:none;}
+.colHead .colResize:hover{background:linear-gradient(90deg,transparent,rgba(146,65,255,.30));}
+.colHead .colResize.dragging{background:linear-gradient(90deg,transparent,rgba(146,65,255,.55));}
 .colHead.insL{box-shadow:inset 2px 0 0 var(--violet-adpt);}
 .colHead.insR{box-shadow:inset -2px 0 0 var(--violet-adpt);}
 .colGhost{position:fixed; z-index:90; pointer-events:none; opacity:.92; height:var(--headH); display:flex; align-items:center; padding:0 10px; background:var(--panel); border:1px solid var(--violet-adpt); border-radius:var(--r-sm); font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; color:var(--ink-soft); text-transform:uppercase; box-shadow:var(--shadow-hover);}
@@ -311,6 +322,24 @@ button{font-family:inherit; cursor:pointer;}
 .swatch{width:28px; height:28px; border-radius:9px; cursor:pointer; border:2px solid transparent;}
 .swatch.on{border-color:var(--ink); box-shadow:0 0 0 2px #fff inset;}
 .modActsRow{display:flex; justify-content:flex-end; gap:9px; margin-top:18px;}
+
+/* module create — move-features picker (rows are <label>s inside .field; scope
+   past the .field label rule so its uppercase/mono/block styling doesn't leak) */
+.mpList{max-height:200px; overflow:auto; border:1px solid var(--line-strong); border-radius:var(--r-md); background:#fff; padding:6px;}
+.mpList .mpGroup{margin-bottom:4px;}
+.mpList .mpGroup:last-child{margin-bottom:0;}
+.mpList .mpHead{display:flex; align-items:center; gap:8px; margin:0; padding:6px 9px; border-radius:var(--r-sm); background:var(--surface); cursor:pointer; user-select:none;}
+.mpList .mpHead:hover{background:var(--line);}
+.mpList .mpFeat{display:flex; align-items:center; gap:8px; margin:0; padding:5px 9px 5px 28px; border-radius:var(--r-sm); cursor:pointer; user-select:none;}
+.mpList .mpFeat:hover{background:var(--surface);}
+.mpModName{font-family:var(--font-body); font-weight:600; font-size:12.5px; letter-spacing:normal; text-transform:none; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.mpFeatName{font-family:var(--font-body); font-weight:400; font-size:12.5px; letter-spacing:normal; text-transform:none; color:var(--ink-soft); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.mpHead .chip{margin-left:1px;}
+.mpHead .count{margin-left:auto;}
+.mpFeat .fid{margin-right:0;}
+.mpChk, .mpAll{width:15px; height:15px; flex:0 0 auto; accent-color:var(--violet-adpt); cursor:pointer; margin:0;}
+.mpCounter{font-family:var(--mono); font-size:11px; color:var(--ink-faint); margin-top:8px;}
+.mpEmpty{font-size:12.5px; color:var(--ink-faint); padding:12px 14px; border:1px dashed var(--line-strong); border-radius:var(--r-md); background:var(--surface);}
 
 #historyOverlay{position:fixed; inset:0; background:var(--surface); z-index:85; display:none; flex-direction:column;}
 .histHead{background:var(--panel); border-bottom:1px solid var(--line); padding:16px 26px; display:flex; align-items:center; gap:14px;}

@@ -57,6 +57,22 @@ Same-day follow-up fixes from user feedback on the tuning pass above.
   persist locally under `adeptio_ptrack_ui` → `colW` — browser `localStorage` only,
   never written to the cloud document/database. Column drag-to-reorder is unchanged.
 
+### Round 3 (same day)
+Same-day addition to the tuning pass, from further user feedback.
+
+- **Move features into a new module at creation time** — the "สร้างโมดูล" (Create
+  Module) modal gained an optional picker, "ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features
+  into this module (ไม่บังคับ)": a scrollable (max-height) list of every existing
+  module, each shown as a group header (colour chip + name + feature count + a
+  per-module "select all" checkbox, with indeterminate state) and its features as
+  individual checkbox rows (checkbox + fid badge + name), plus a live "เลือกแล้ว N
+  ฟีเจอร์" counter. On save, any checked features are **moved** — not copied — out
+  of their source module and into the new module; the feature object itself
+  (id/fid/dates/status/custom fields) is left untouched, only its parent module
+  changes, and emptied source modules are left in place. The success toast becomes
+  "สร้างโมดูลแล้ว · ย้าย N ฟีเจอร์เข้าโมดูล" when N > 0. Creating a module with
+  nothing selected, and editing an existing module, behave exactly as before.
+
 ---
 
 ## [2.3.0] — 2026-06-21
