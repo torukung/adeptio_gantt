@@ -10,6 +10,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); dates in CE.
 
 ---
 
+## [1.0.2] — 2026-07-09
+Timeline & table polish (tuning pass), plus a read-only preview build.
+
+### Changed
+- **Timeline header** — month-year label (e.g. "Jul '26") is now **centered** within
+  its month band (`.monthBand` `justify-content:center`), was left-aligned.
+- **Gantt bar tooltips** — hovering a bar whose label is truncated now shows a
+  **floating tooltip** with the full text; if the label already fits, no tooltip
+  appears. Replaces the native `title` attribute with a shared `.floatTip`
+  mechanism (delegated `mouseover`/`mousemove` on `#board`); bar date/status
+  info moved to `data-tip`.
+- **Left table** — new **"Wrap Txt"** toggle (seg button in the Timeline toolbar,
+  persisted to `localStorage` under `adeptio_ptrack_ui`, default **OFF**).
+  - **ON** — Feature & Description cells wrap to multiple lines; chart rows
+    auto-sync heights (`applyWrap` / `syncRowHeights`) so bars stay aligned and
+    vertically centered.
+  - **OFF** — current ellipsis behavior, plus a floating tooltip with the full
+    text (format "FID · Name" for feature cells) when a cell is truncated.
+
+### Added
+- **Read-only PREVIEW copy** under `preview/` — namespaced `_preview`
+  localStorage keys, all `PUT`/`POST`/`PATCH`/`DELETE` API calls neutralized
+  (`GET` reads still hit live data), "PREVIEW · read-only" ribbon. No changes
+  to `worker.js`, `schema.sql`, `wrangler.toml`, the D1 database, or user
+  content.
+
+---
+
 ## [2.3.0] — 2026-06-21
 Two-page project view.
 

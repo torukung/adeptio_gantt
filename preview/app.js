@@ -49,7 +49,7 @@ function daysBetween(a,b){ return Math.round((parse(b)-parse(a))/DAY); }
 function startOfMonth(d){ return new Date(d.getFullYear(),d.getMonth(),1); }
 function endOfMonth(d){ return new Date(d.getFullYear(),d.getMonth()+1,0); }
 function today(){ const t=new Date(); return new Date(t.getFullYear(),t.getMonth(),t.getDate()); }
-const LS_UI = "adeptio_ptrack_ui";
+const LS_UI = "adeptio_ptrack_ui_preview";
 const ui = { zoom:"week", cal:"CE", wrapTxt:false };
 try{ const _u=JSON.parse(localStorage.getItem(LS_UI)||"{}"); if(_u && typeof _u==="object" && "wrapTxt" in _u) ui.wrapTxt=!!_u.wrapTxt; }catch(e){}
 function saveUi(){ try{ localStorage.setItem(LS_UI, JSON.stringify({wrapTxt:!!ui.wrapTxt})); }catch(e){} }
@@ -84,8 +84,8 @@ const IC = {
 };
 
 /* =====================  STORE (local-first, optional cloud sync)  ===== */
-const LS_KEY = "adeptio_ptrack_v2";
-const LS_REV = "adeptio_ptrack_rev";
+const LS_KEY = "adeptio_ptrack_v2_preview";
+const LS_REV = "adeptio_ptrack_rev_preview";
 let MEM = null, DB = null;
 function safeGet(){ try{ return localStorage.getItem(LS_KEY); }catch(e){ return null; } }
 function safeSet(v){ try{ localStorage.setItem(LS_KEY,v); return true; }catch(e){ return false; } }
@@ -97,6 +97,23 @@ const API_BASE  = "https://adeptio-gantt.pathom-bot.workers.dev"; // e.g. "https
 const API_TOKEN = "adeptiolab.com"; // must equal the Worker's API_TOKEN secret (if it sets one)       
 const WORKSPACE = "default";
 const cloudOn = () => !!API_BASE;
+/* ===== PREVIEW SAFETY: read-only. Block ALL cloud writes to D1 ===== */
+const PREVIEW_READONLY = true;
+(function(){
+  const _origFetch = window.fetch ? window.fetch.bind(window) : null;
+  if(!_origFetch) return;
+  window.fetch = function(url, opts){
+    try{
+      const m = ((opts && opts.method) || 'GET').toUpperCase();
+      const u = (typeof url === 'string') ? url : (url && url.url) || '';
+      if((m==='PUT'||m==='POST'||m==='DELETE'||m==='PATCH') && u.indexOf(API_BASE)===0){
+        console.warn('[PREVIEW] blocked '+m+' '+u);
+        return Promise.resolve(new Response(JSON.stringify({ok:true,preview:true,blocked:true}), {status:200, headers:{'content-type':'application/json'}}));
+      }
+    }catch(e){}
+    return _origFetch(url, opts);
+  };
+})();
 function apiUrl(path){ const sep = path.includes("?") ? "&" : "?"; return API_BASE.replace(/\/$/,"") + path + sep + "ws=" + encodeURIComponent(WORKSPACE); }
 function apiHeaders(extra){ const h = { "content-type":"application/json", ...(extra||{}) }; if(API_TOKEN) h["authorization"] = "Bearer " + API_TOKEN; return h; }
 function lsRev(){ try{ return (+(localStorage.getItem(LS_REV)||0))||0; }catch(e){ return 0; } }
@@ -117,6 +134,7 @@ function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
 let pushTimer=null, pushPending=false;
 function schedulePush(){ pushPending=true; clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, 800); }
 async function cloudPush(){
+  if(PREVIEW_READONLY) return; /* PREVIEW: cloud writes disabled */
   if(!cloudOn()) return;
   try{
     const res = await fetch(apiUrl("/api/state"), { method:"PUT", headers:apiHeaders(), body:JSON.stringify({doc:DB}) });
@@ -899,7 +917,7 @@ function cellTipText(txt){
   const fid = txt.querySelector('.fid');
   if(!fid) return txt.textContent.trim();
   const name = (txt.textContent||'').slice(fid.textContent.length).trim();
-  return (fid.textContent.trim() + ' · ' + name).trim();
+  return (fid.textContent.trim() + ' \u00b7 ' + name).trim();
 }
 function onBoardMove(e){ if(_tipEl && _tipEl.style.display==='block') positionTip(e.clientX, e.clientY); }
 
