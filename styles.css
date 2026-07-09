@@ -220,6 +220,7 @@ button{font-family:inherit; cursor:pointer;}
 
 .modRow{display:flex; align-items:center; gap:8px; height:var(--modH); padding:0 8px 0 6px; background:linear-gradient(180deg,#fbfaff,#f4f2fb); border-bottom:1px solid var(--line-strong); position:relative;}
 .modRow.dropInto{box-shadow:inset 0 0 0 2px var(--violet-adpt);}
+.addFeat.dropInto{box-shadow:inset 0 0 0 2px var(--violet-adpt); background:#f3ecff;}
 .caret{width:18px; height:18px; display:flex; align-items:center; justify-content:center; color:var(--ink-soft); border-radius:6px; flex:0 0 auto;}
 .caret:hover{background:var(--line);}
 .caret svg{width:12px; height:12px; transition:transform .15s;}
@@ -235,8 +236,8 @@ button{font-family:inherit; cursor:pointer;}
 
 .featRow{display:flex; align-items:stretch; height:var(--rowH); border-bottom:1px solid var(--line); background:var(--panel);}
 .featRow:hover{background:#faf9ff;}
-.featRow.dropBefore{box-shadow:inset 0 2px 0 var(--violet-adpt);}
-.featRow.dropAfter{box-shadow:inset 0 -2px 0 var(--violet-adpt);}
+.featRow.dropBefore{box-shadow:inset 0 3px 0 var(--violet-adpt); background:#f6f0ff;}
+.featRow.dropAfter{box-shadow:inset 0 -3px 0 var(--violet-adpt); background:#f6f0ff;}
 .cell{flex:0 0 auto; border-right:1px solid var(--line); padding:0 8px; display:flex; align-items:center; min-width:0; position:relative;}
 .cell.feat{padding-left:4px;}
 .grip{width:16px; flex:0 0 auto; display:flex; align-items:center; justify-content:center; color:var(--grey-light-adpt); cursor:grab; touch-action:none;}

@@ -914,15 +914,29 @@ function tipEl(){
 function showTip(text,x,y){ const t=tipEl(); t.textContent=text; t.style.display='block'; positionTip(x,y); }
 function positionTip(x,y){ const t=_tipEl; if(!t) return; const pad=14, w=t.offsetWidth, h=t.offsetHeight; let tx=x+pad, ty=y+pad; if(tx+w>innerWidth-8) tx=x-w-pad; if(ty+h>innerHeight-8) ty=y-h-pad; t.style.left=Math.max(6,tx)+'px'; t.style.top=Math.max(6,ty)+'px'; }
 function hideTip(){ if(_tipEl) _tipEl.style.display='none'; }
+/* True when `inner` is partially or fully outside the horizontal visible box of
+   its scroll container (i.e. scrolled off the left/right edge). */
+function isClipped(inner, container){
+  if(!inner || !container) return false;
+  const ir=inner.getBoundingClientRect(), cr=container.getBoundingClientRect();
+  return ir.left < cr.left - 0.5 || ir.right > cr.right + 0.5;
+}
+/* A bar label needs the floatTip when its text is truncated inside the bar OR
+   scrolled out of the chart viewport (#rightScroll) so it is not fully visible. */
+function labelNeedsTip(lbl){
+  if(!lbl) return false;
+  if((lbl.scrollWidth - lbl.clientWidth) > 1) return true;   // truncated (ellipsis)
+  return isClipped(lbl, el('rightScroll'));                  // horizontally out of view
+}
 function onBoardOver(e){
   const t=e.target;
   const bar = t.closest && t.closest('.bar');
-  if(bar){ const lbl=bar.querySelector('.blabel'); if(lbl && (lbl.scrollWidth - lbl.clientWidth) > 1){ showTip(lbl.textContent, e.clientX, e.clientY); } else hideTip(); return; }
+  if(bar){ const lbl=bar.querySelector('.blabel'); if(labelNeedsTip(lbl)){ showTip(lbl.textContent, e.clientX, e.clientY); } else hideTip(); return; }
   const txt = t.closest && t.closest('.cell .txt');
   if(txt){
     const cell = txt.closest('.cell');
     const isTarget = cell.classList.contains('feat') || txt.dataset.field==='description';
-    if(isTarget && document.activeElement!==txt && (txt.scrollWidth - txt.clientWidth) > 1){ showTip(cellTipText(txt), e.clientX, e.clientY); } else hideTip();
+    if(isTarget && document.activeElement!==txt && ((txt.scrollWidth - txt.clientWidth) > 1 || isClipped(txt, el('leftScroll')))){ showTip(cellTipText(txt), e.clientX, e.clientY); } else hideTip();
     return;
   }
   // module description row — floatTip on truncation (replaces the old native title)
@@ -945,7 +959,11 @@ function cellTipText(txt){
   const name = (txt.textContent||'').slice(fid.textContent.length).trim();
   return (fid.textContent.trim() + ' \u00b7 ' + name).trim();
 }
-function onBoardMove(e){ if(_tipEl && _tipEl.style.display==='block') positionTip(e.clientX, e.clientY); }
+function onBoardMove(e){
+  const bar = e.target && e.target.closest && e.target.closest('.bar');
+  if(bar){ const lbl=bar.querySelector('.blabel'); if(labelNeedsTip(lbl)) showTip(lbl.textContent, e.clientX, e.clientY); else hideTip(); return; }
+  if(_tipEl && _tipEl.style.display==='block') positionTip(e.clientX, e.clientY);
+}
 
 /* =====================  GRID INTERACTIONS  ===================== */
 function bindGrid(){
@@ -1160,22 +1178,52 @@ function clearDrop(){ document.querySelectorAll('.dropBefore,.dropAfter,.dropInt
 function onRowDragStart(e){
   e.preventDefault();
   const featEl=e.target.closest('.featRow'); if(!featEl) return;
-  rowDrag={ smi:+featEl.dataset.mi, sfi:+featEl.dataset.fi, target:null };
-  const g=featEl.cloneNode(true); g.classList.add('rowGhost'); g.style.width=featEl.offsetWidth+"px"; g.style.left=e.clientX+"px"; g.style.top=e.clientY+"px";
+  rowDrag={ smi:+featEl.dataset.mi, sfi:+featEl.dataset.fi, target:null, lastX:e.clientX, lastY:e.clientY, raf:0 };
+  const g=featEl.cloneNode(true); g.classList.add('rowGhost'); g.style.pointerEvents='none'; g.style.width=featEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
   document.body.appendChild(g); rowDrag.ghost=g; document.body.style.userSelect='none';
+  rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
   window.addEventListener('pointermove', onRowDragMove); window.addEventListener('pointerup', onRowDragUp, {once:true});
+}
+/* Hit-test the point (x,y) and mark the drop target: over a featRow → insert
+   before/after it; over a module header or a collapsed module → insert at top;
+   over the "เพิ่มฟีเจอร์" add-zone → append at the end of that module. */
+function rowDragEval(x,y){
+  if(!rowDrag) return;
+  clearDrop(); rowDrag.target=null;
+  const under=document.elementFromPoint(x,y); if(!under||!under.closest) return;
+  const row=under.closest('.featRow');
+  if(row){ const rc=row.getBoundingClientRect(); const before=y<rc.top+rc.height/2; rowDrag.target={mi:+row.dataset.mi,fi:+row.dataset.fi,before}; row.classList.add(before?'dropBefore':'dropAfter'); return; }
+  const add=under.closest('.addFeat');
+  if(add){ const mi=+add.dataset.mi, P=proj(); const n=(P&&P.modules[mi])?P.modules[mi].features.length:0; rowDrag.target={mi,fi:n,before:true}; add.classList.add('dropInto'); return; }
+  const mod=under.closest('.modRow');
+  if(mod){ rowDrag.target={mi:+mod.dataset.mi,fi:0,before:true}; mod.classList.add('dropInto'); }
 }
 function onRowDragMove(e){
   if(!rowDrag) return;
-  rowDrag.ghost.style.left=(e.clientX-18)+"px"; rowDrag.ghost.style.top=(e.clientY-14)+"px"; rowDrag.ghost.style.pointerEvents='none';
-  const under=document.elementFromPoint(e.clientX,e.clientY); clearDrop(); rowDrag.target=null;
-  const row=under&&under.closest?under.closest('.featRow'):null;
-  if(row){ const rc=row.getBoundingClientRect(); const before=e.clientY<rc.top+rc.height/2; rowDrag.target={mi:+row.dataset.mi,fi:+row.dataset.fi,before}; row.classList.add(before?'dropBefore':'dropAfter'); return; }
-  const mod=under&&under.closest?under.closest('.modRow'):null;
-  if(mod){ rowDrag.target={mi:+mod.dataset.mi,fi:0,before:true}; mod.classList.add('dropInto'); }
+  rowDrag.lastX=e.clientX; rowDrag.lastY=e.clientY;
+  rowDrag.ghost.style.left=(e.clientX-18)+"px"; rowDrag.ghost.style.top=(e.clientY-14)+"px";
+  rowDragEval(e.clientX, e.clientY);
+}
+/* While dragging near the top/bottom edge of the left table viewport, scroll it
+   (and keep the right pane in vertical sync) so distant modules stay reachable. */
+function rowDragAutoScroll(){
+  if(!rowDrag) return;
+  const ls=el('leftScroll');
+  if(ls){
+    const r=ls.getBoundingClientRect(), EDGE=52, MAX=20, y=rowDrag.lastY; let dv=0;
+    if(y<r.top+EDGE) dv=-Math.ceil(MAX*Math.min(1,(r.top+EDGE-y)/EDGE));
+    else if(y>r.bottom-EDGE) dv=Math.ceil(MAX*Math.min(1,(y-(r.bottom-EDGE))/EDGE));
+    if(dv){
+      const prev=ls.scrollTop, max=ls.scrollHeight-ls.clientHeight;
+      ls.scrollTop=Math.max(0, Math.min(max, prev+dv));
+      if(ls.scrollTop!==prev){ const rs=el('rightScroll'); if(rs) rs.scrollTop=ls.scrollTop; rowDragEval(rowDrag.lastX, rowDrag.lastY); }
+    }
+  }
+  rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
 }
 function onRowDragUp(){
   if(!rowDrag) return; window.removeEventListener('pointermove', onRowDragMove); document.body.style.userSelect='';
+  if(rowDrag.raf) cancelAnimationFrame(rowDrag.raf);
   if(rowDrag.ghost) rowDrag.ghost.remove(); clearDrop();
   const d=rowDrag; rowDrag=null; if(!d.target) return;
   moveFeature(d.smi,d.sfi,d.target.mi,d.target.fi,d.target.before);

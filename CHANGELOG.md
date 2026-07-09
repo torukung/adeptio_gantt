@@ -73,6 +73,29 @@ Same-day addition to the tuning pass, from further user feedback.
   "สร้างโมดูลแล้ว · ย้าย N ฟีเจอร์เข้าโมดูล" when N > 0. Creating a module with
   nothing selected, and editing an existing module, behave exactly as before.
 
+### Round 4 (same day)
+Same-day fixes to feature drag & drop and Gantt bar tooltips, from annotated
+screenshots in further user feedback.
+
+- **Fixed cross-module feature drag & drop** — dragging a feature row's grip now
+  reliably moves it into **any** module, not just ones already visible on screen.
+  Root cause: hit-testing and the move itself worked fine when source and
+  destination were both on screen, but there was no auto-scroll, so a destination
+  module scrolled out of the left-table viewport was simply unreachable mid-drag.
+  Dragging near the top/bottom edge of the left pane now auto-scrolls it (right
+  pane stays vertically synced) while continuously re-evaluating the drop target,
+  so far-away modules scroll into reach. Also added drop-on-module-header (inserts
+  at the top of that module), drop-on-a-collapsed-module, and drop-on-the-
+  "เพิ่มฟีเจอร์" zone (appends at the end of that module), plus stronger
+  insertion indicators. The moved feature's Gantt bar automatically recolors to
+  the destination module's palette colour; the feature object itself
+  (id/fid/dates/status/custom fields) is preserved untouched.
+- **Floating tooltip on scrolled-out-of-view bar labels** — the bar tooltip now
+  also appears when a Gantt bar's label has scrolled outside the visible chart
+  area (e.g. a wide bar whose label extends past the left edge of `#rightScroll`),
+  not only when the label is truncated inside a narrow bar. Fully visible,
+  untruncated labels still show no tooltip.
+
 ---
 
 ## [2.3.0] — 2026-06-21
