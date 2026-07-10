@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Adeptio · Project Tracking · PREVIEW</title>
+<link rel="icon" href="../assets/icon-adeptio.png" />
+
+<!-- Adeptio Lab type: Comfortaa (display) + Kanit (body, Thai-capable) -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@400;500;600;700&family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+
+<!-- Excel + PNG export libraries (need network) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
+<link rel="stylesheet" href="./styles.css" />
+<style>
+  /* PREVIEW read-only ribbon — bottom-right so it never covers the toolbar */
+  #previewBadge{position:fixed; bottom:12px; right:12px; z-index:100000; display:flex; align-items:center; gap:6px;
+    font-family:'Kanit',system-ui,sans-serif; font-weight:600; font-size:11px; letter-spacing:.03em; color:#fff;
+    padding:6px 12px; border-radius:50px; background:linear-gradient(90deg,#9241ff,#ff83e4);
+    box-shadow:0 4px 14px rgba(146,65,255,.35); pointer-events:none; opacity:.92;}
+  #previewBadge:before{content:""; width:7px; height:7px; border-radius:50%; background:#fff; box-shadow:0 0 0 2px rgba(255,255,255,.4);}
+</style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="modalRoot"></div>
+  <div id="historyOverlay"></div>
+  <div id="toast"></div>
+  <div id="previewBadge">PREVIEW · read-only</div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

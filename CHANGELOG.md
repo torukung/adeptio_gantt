@@ -10,6 +10,94 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); dates in CE.
 
 ---
 
+## [1.0.2] — 2026-07-09
+Timeline & table polish (tuning pass), plus a read-only preview build.
+
+### Changed
+- **Timeline header** — month-year label (e.g. "Jul '26") is now **centered** within
+  its month band (`.monthBand` `justify-content:center`), was left-aligned.
+- **Gantt bar tooltips** — hovering a bar whose label is truncated now shows a
+  **floating tooltip** with the full text; if the label already fits, no tooltip
+  appears. Replaces the native `title` attribute with a shared `.floatTip`
+  mechanism (delegated `mouseover`/`mousemove` on `#board`); bar date/status
+  info moved to `data-tip`.
+- **Left table** — new **"Wrap Txt"** toggle (seg button in the Timeline toolbar,
+  persisted to `localStorage` under `adeptio_ptrack_ui`, default **OFF**).
+  - **ON** — Feature & Description cells wrap to multiple lines; chart rows
+    auto-sync heights (`applyWrap` / `syncRowHeights`) so bars stay aligned and
+    vertically centered.
+  - **OFF** — current ellipsis behavior, plus a floating tooltip with the full
+    text (format "FID · Name" for feature cells) when a cell is truncated.
+
+### Added
+- **Read-only PREVIEW copy** under `preview/` — namespaced `_preview`
+  localStorage keys, all `PUT`/`POST`/`PATCH`/`DELETE` API calls neutralized
+  (`GET` reads still hit live data), "PREVIEW · read-only" ribbon. No changes
+  to `worker.js`, `schema.sql`, `wrangler.toml`, the D1 database, or user
+  content.
+
+### Round 2 (same day, after review)
+Same-day follow-up fixes from user feedback on the tuning pass above.
+
+- **Fixed duplicate tooltip** — module-description rows (`.modDesc`) still carried a
+  native `title` attribute alongside the dark `.floatTip`, so a truncated description
+  showed both the gray browser tooltip and the floating one at once; the column-header
+  drag hint had the same issue. Both now use `data-tip` and route through the shared
+  floatTip, which gained a singleton guard (reuses/removes any existing `.floatTip`
+  node) so only one can ever be on screen.
+- **Wrap Txt toggle relocated** — moved off the Timeline toolbar and onto a compact
+  icon button on the Description column header itself (styled like the other header
+  controls, shows an "on" state when active); the toolbar seg button was removed.
+  Setting still persists to `localStorage` (`adeptio_ptrack_ui`) as before. In the
+  preview build, the "PREVIEW · read-only" ribbon moved to the bottom-right so it no
+  longer covers the toolbar.
+- **All left-table columns are now drag-resizable** — a small handle on each header's
+  right edge resizes that column (min 60px / max 640px); with Wrap Txt on, row heights
+  and the matching Gantt bar rows follow the content live during the drag. Widths
+  persist locally under `adeptio_ptrack_ui` → `colW` — browser `localStorage` only,
+  never written to the cloud document/database. Column drag-to-reorder is unchanged.
+
+### Round 3 (same day)
+Same-day addition to the tuning pass, from further user feedback.
+
+- **Move features into a new module at creation time** — the "สร้างโมดูล" (Create
+  Module) modal gained an optional picker, "ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features
+  into this module (ไม่บังคับ)": a scrollable (max-height) list of every existing
+  module, each shown as a group header (colour chip + name + feature count + a
+  per-module "select all" checkbox, with indeterminate state) and its features as
+  individual checkbox rows (checkbox + fid badge + name), plus a live "เลือกแล้ว N
+  ฟีเจอร์" counter. On save, any checked features are **moved** — not copied — out
+  of their source module and into the new module; the feature object itself
+  (id/fid/dates/status/custom fields) is left untouched, only its parent module
+  changes, and emptied source modules are left in place. The success toast becomes
+  "สร้างโมดูลแล้ว · ย้าย N ฟีเจอร์เข้าโมดูล" when N > 0. Creating a module with
+  nothing selected, and editing an existing module, behave exactly as before.
+
+### Round 4 (same day)
+Same-day fixes to feature drag & drop and Gantt bar tooltips, from annotated
+screenshots in further user feedback.
+
+- **Fixed cross-module feature drag & drop** — dragging a feature row's grip now
+  reliably moves it into **any** module, not just ones already visible on screen.
+  Root cause: hit-testing and the move itself worked fine when source and
+  destination were both on screen, but there was no auto-scroll, so a destination
+  module scrolled out of the left-table viewport was simply unreachable mid-drag.
+  Dragging near the top/bottom edge of the left pane now auto-scrolls it (right
+  pane stays vertically synced) while continuously re-evaluating the drop target,
+  so far-away modules scroll into reach. Also added drop-on-module-header (inserts
+  at the top of that module), drop-on-a-collapsed-module, and drop-on-the-
+  "เพิ่มฟีเจอร์" zone (appends at the end of that module), plus stronger
+  insertion indicators. The moved feature's Gantt bar automatically recolors to
+  the destination module's palette colour; the feature object itself
+  (id/fid/dates/status/custom fields) is preserved untouched.
+- **Floating tooltip on scrolled-out-of-view bar labels** — the bar tooltip now
+  also appears when a Gantt bar's label has scrolled outside the visible chart
+  area (e.g. a wide bar whose label extends past the left edge of `#rightScroll`),
+  not only when the label is truncated inside a narrow bar. Fully visible,
+  untruncated labels still show no tooltip.
+
+---
+
 ## [2.3.0] — 2026-06-21
 Two-page project view.
 
