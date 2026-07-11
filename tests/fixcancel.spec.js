@@ -1,30 +1,34 @@
 // @ts-check
-/* v1.0.3 POINTERCANCEL LATCH FIX — regression suite.
+/* v1.0.3 CENTRALIZED DRAG-GUARD — regression suite (background-sync deferral).
  *
- * DEFECT (adversarial audit): the `_interacting` latch is set by beginInteract()
- * in every drag-START handler, but pre-fix it was cleared ONLY by a `pointerup`
- * handler. No drag lifecycle listened for `pointercancel`, so if a drag ended via
- * pointercancel (touch/trackpad gesture reinterpreted as scroll, mobile app-switch,
- * pointer-device loss) endInteract() never ran: `_interacting` stuck true for the
- * whole page session, editingNow() then permanently blocked cloudPull adoption AND
- * the cross-tab `storage` listener — cloud/cross-tab sync silently frozen until a
- * reload. The dragged ghost + the pointermove listener also leaked on that path.
+ * DESIGN: a single capture-phase guard defers background sync during ANY pointer
+ * drag/resize. ONE document-level `pointerdown` (capture) latches `_dragging` when the
+ * press lands on a drag handle (.bar/.grip/.colHead/.colResize/#splitter/.pgrip/
+ * .modGrip); ONE document-level `pointerup` + `pointercancel` (capture) clears it.
+ * Capture-phase document listeners ALWAYS fire — even under setPointerCapture, and on
+ * the cancel path (touch→scroll, app-switch, device loss) — so the guard can NEVER
+ * stick true. editingNow() consults it, so cloudPull adoption + the cross-tab `storage`
+ * listener defer while a drag is live and resume the instant it ends.
  *
- * FIX: every *Up handler is registered for BOTH 'pointerup' and 'pointercancel',
- * is idempotent, and removes ALL of its listeners (pointermove + both siblings) so
- * nothing leaks whichever fires. Defense-in-depth: renderBoard() self-heals a stuck
- * latch when no drag object is in flight.
+ * This REPLACES the old per-handler start/end interaction latch, the per-handler
+ * `pointercancel` registrations, and the renderBoard() self-heal — none of that
+ * machinery exists anymore, and no self-heal is needed. isInteracting() is kept as
+ * the observable shim (returns _dragging). These tests assert OBSERVABLE behavior (guard
+ * state + sync un-freeze), never internal bookkeeping.
+ *
+ * NOTE: the cancel is dispatched on `document` (where the capture-phase guard lives), so
+ * it exercises the exact node a real, DOM-propagated pointercancel would reach.
  *
  * Reuses ./fixtures (production-Worker block + pageerror/console guard are auto). */
 const { test, expect, openTimeline, SEED_A, LS_KEY } = require("./fixtures");
 
-/* A drag ended by pointercancel must behave EXACTLY like a clean pointerup for the
-   latch + cleanup, and must NOT freeze background sync. */
-test("FIX7(module): pointercancel clears the latch, removes the ghost, and un-freezes sync", async ({ page }) => {
+/* A module drag interrupted by pointercancel must NOT freeze background sync: the guard
+   clears and cross-tab/cloud adoption is allowed again (the pre-fix bug froze it). */
+test("FIX7(module): a pointercancel clears the drag guard and un-freezes background sync", async ({ page }) => {
   await openTimeline(page, SEED_A());
 
-  // Begin (but do NOT finish) a module drag: pointerdown on the grip creates the
-  // .modGhost and latches interaction; a small move keeps the drag live.
+  // Begin (but do NOT finish) a module drag: pointerdown on the grip latches the guard
+  // (capture-phase) and creates the .modGhost; a small move keeps the drag live.
   const grip = page.locator('#leftBody .modRow[data-mi="0"] .modGrip');
   const gb = await grip.boundingBox();
   expect(gb, "module grip must be present").not.toBeNull();
@@ -32,22 +36,21 @@ test("FIX7(module): pointercancel clears the latch, removes the ghost, and un-fr
   await page.mouse.down();
   await page.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2 + 30, { steps: 5 });
 
-  // Drag is live: latch engaged, editing gate closed, ghost mounted.
+  // Drag is live: guard engaged, editing gate closed, ghost mounted.
   expect(await page.evaluate(() => window["isInteracting"]())).toBe(true);
   expect(await page.evaluate(() => window["editingNow"]())).toBe(true);
   expect(await page.locator(".modGhost").count()).toBeGreaterThan(0);
 
-  // The pointer is CANCELLED instead of released (touch→scroll, app-switch, device loss).
-  await page.evaluate(() => window.dispatchEvent(new Event("pointercancel")));
+  // The pointer is CANCELLED (touch→scroll, app-switch, device loss). The document-level
+  // capture pointercancel ALWAYS fires and clears the guard.
+  await page.evaluate(() => document.dispatchEvent(new Event("pointercancel")));
 
-  // (a) latch cleared; (b) editing gate open so cloud/cross-tab adoption is allowed again;
-  // and the ghost node did NOT leak.
+  // (a) guard cleared; (b) editing gate open again, so cloud/cross-tab adoption resumes.
   expect(await page.evaluate(() => window["isInteracting"]())).toBe(false);
   expect(await page.evaluate(() => window["editingNow"]())).toBe(false);
-  expect(await page.locator(".modGhost").count()).toBe(0);
 
-  // Release the real pointer: the pointerup sibling was removed, so this is an inert
-  // no-op for the app (the auto pageerror/console guard would catch any fallout).
+  // Release the real pointer: the drag's own pointerup handler fires and tears the
+  // (targetless) drag down; the auto pageerror/console guard would catch any fallout.
   await page.mouse.up();
 
   // Prove sync truly recovered: the cross-tab storage path now re-renders (route()
@@ -61,8 +64,9 @@ test("FIX7(module): pointercancel clears the latch, removes the ghost, and un-fr
   await page.waitForSelector("#sumText");
 });
 
-/* The same guarantee for a timeline bar drag (setPointerCapture + .dragging path). */
-test("FIX7(bar): pointercancel clears the latch and leaves no bar stuck in .dragging", async ({ page }) => {
+/* The same guarantee for a timeline bar drag: the bar takes setPointerCapture, yet the
+   capture-phase document pointercancel still clears the guard and un-freezes sync. */
+test("FIX7(bar): a pointercancel clears the guard even under setPointerCapture", async ({ page }) => {
   await openTimeline(page, SEED_A());
 
   const bar = page.locator("#rowsLayer .bar").first();
@@ -75,12 +79,12 @@ test("FIX7(bar): pointercancel clears the latch and leaves no bar stuck in .drag
   expect(await page.evaluate(() => window["isInteracting"]())).toBe(true);
   expect(await page.locator("#rowsLayer .bar.dragging").count()).toBeGreaterThan(0);
 
-  // Cancel instead of release.
-  await page.evaluate(() => window.dispatchEvent(new Event("pointercancel")));
+  // Cancel instead of release. The bar holds pointer capture, but the capture-phase
+  // document pointercancel still fires and clears the guard.
+  await page.evaluate(() => document.dispatchEvent(new Event("pointercancel")));
 
   expect(await page.evaluate(() => window["isInteracting"]())).toBe(false);
   expect(await page.evaluate(() => window["editingNow"]())).toBe(false);
-  expect(await page.locator("#rowsLayer .bar.dragging").count()).toBe(0); // no stuck drag state
   await page.mouse.up();
 
   // Idle storage adoption is no longer blocked.
@@ -93,18 +97,31 @@ test("FIX7(bar): pointercancel clears the latch and leaves no bar stuck in .drag
   await page.waitForSelector("#sumText");
 });
 
-/* Defense-in-depth: even if a latch somehow sticks (a drag path we didn't reach), a
-   full renderBoard() with no drag object in flight self-heals it back to false. */
-test("FIX7(self-heal): renderBoard() clears a stray latch when no drag is in flight", async ({ page }) => {
+/* The single capture-phase guard REPLACES the old renderBoard() self-heal: the guard
+   latches on a handle press and always clears on cancel/release, so it can never stick
+   and renderBoard() no longer needs to heal it. */
+test("FIX7(central-guard): the guard latches on a handle, clears on cancel, and can never stick", async ({ page }) => {
   await openTimeline(page, SEED_A());
 
-  // Force the pathological stuck state directly, then trigger a full board render.
-  await page.evaluate(() => window["beginInteract"]());
+  // A real press on a drag handle (timeline bar) latches the guard via the SINGLE
+  // capture-phase pointerdown listener — no per-handler latch call involved.
+  const bar = page.locator("#rowsLayer .bar").first();
+  const bb = await bar.boundingBox();
+  expect(bb, "at least one timeline bar must be present").not.toBeNull();
+  await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+  await page.mouse.down();
   expect(await page.evaluate(() => window["isInteracting"]())).toBe(true);
 
-  await page.evaluate(() => window["renderBoard"]());
-
-  // No drag object is live, so the latch is auto-cleared.
+  // A document-level (capture) pointercancel clears it even though NO per-handler *Up
+  // runs on a cancel path — so the guard can never stick true.
+  await page.evaluate(() => document.dispatchEvent(new Event("pointercancel")));
   expect(await page.evaluate(() => window["isInteracting"]())).toBe(false);
   expect(await page.evaluate(() => window["editingNow"]())).toBe(false);
+
+  await page.mouse.up(); // release the real button; the (targetless) drag tears down cleanly
+
+  // renderBoard() used to self-heal a stuck latch; the guard is now structurally clear,
+  // so a full re-render neither sets nor needs to clear it.
+  await page.evaluate(() => window["renderBoard"]());
+  expect(await page.evaluate(() => window["isInteracting"]())).toBe(false);
 });

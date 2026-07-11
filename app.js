@@ -118,14 +118,25 @@ function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
 
 /* ---- cloud sync engine: local-first; the Worker's `rev` is the tiebreaker ---- */
 let pushTimer=null, pushPending=false, pushFails=0;
-/* Pointer-interaction latch: while a drag/resize is in flight, background cloud/
-   storage sync must NOT re-render or adopt a remote doc (that would corrupt the
-   drag). editingNow() consults this so cloudPull + the storage listener defer. */
-let _interacting=false;
-function isInteracting(){ return _interacting; }
-function beginInteract(){ _interacting=true; }
-function endInteract(){ _interacting=false; }
-function cloudSyncState(){ return { pushPending:pushPending, interacting:_interacting }; } // diagnostic surface (used by tests)
+/* Centralized drag guard (replaces the old per-handler interaction latch): while ANY
+   pointer drag/resize is in flight, background cloud/storage sync must NOT re-render
+   or adopt a remote doc (that would corrupt the drag). ONE capture-phase pointerdown
+   latches _dragging when the press lands on a drag handle; a capture-phase pointerup/
+   pointercancel ALWAYS fires (even under setPointerCapture) and clears it — so the
+   guard can never stick and needs no self-heal. editingNow() consults it so cloudPull
+   + the storage listener defer. Wired exactly once at startup (see wireDragGuard). */
+let _dragging=false;
+const _DRAG_SEL='.bar,.grip,.colHead,.colResize,#splitter,.pgrip,.modGrip';
+function isInteracting(){ return _dragging; }                                         // compat shim (tests): true while a drag is live
+function cloudSyncState(){ return { pushPending:pushPending, interacting:_dragging }; } // diagnostic surface (used by tests)
+let _dragGuardWired=false;
+function wireDragGuard(){                                                              // register ONCE; idempotent even if startup ran twice
+  if(_dragGuardWired) return; _dragGuardWired=true;
+  document.addEventListener('pointerdown', e=>{ if(e.target && e.target.closest && e.target.closest(_DRAG_SEL)) _dragging=true; }, true);
+  const endDrag=()=>{ _dragging=false; };
+  document.addEventListener('pointerup', endDrag, true);
+  document.addEventListener('pointercancel', endDrag, true);
+}
 function schedulePush(){ pushPending=true; clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, 800); }
 async function cloudPush(){
   if(!cloudOn()) return;
@@ -141,7 +152,7 @@ function onPushFail(){                                // FIX: clearing pushPendi
   clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, delay);
 }
 function editingNow(){
-  if(_interacting) return true;               // FIX: never adopt a remote doc while a drag/resize is in flight
+  if(_dragging) return true;                  // never adopt a remote doc while a drag/resize is in flight
   const a=document.activeElement;
   if(a && (a.tagName==="TEXTAREA" || a.tagName==="INPUT" || a.isContentEditable)) return true;
   if(el("modalRoot") && el("modalRoot").style.display==="block") return true;
@@ -527,7 +538,7 @@ function wireBoard(){
   el("splitter").addEventListener('pointerdown', onSplitDown);
   const L=el("leftScroll"), R=el("rightScroll"); let syncing=false;
   L.onscroll=()=>{ hideTip(); if(syncing)return; syncing=true; R.scrollTop=L.scrollTop; syncing=false; };
-  R.onscroll=()=>{ hideTip(); if(syncing)return; syncing=true; L.scrollTop=R.scrollTop; syncing=false; };
+  R.onscroll=()=>{ hideTip(); scheduleStickyLabels(); if(syncing)return; syncing=true; L.scrollTop=R.scrollTop; syncing=false; }; // rAF-throttled sliding labels + vertical pane sync
   const bd=el("board");
   if(bd){ bd.addEventListener('mouseover', onBoardOver); bd.addEventListener('mousemove', onBoardMove); bd.addEventListener('mouseleave', hideTip); }
 }
@@ -559,7 +570,7 @@ function onSplitDown(e){
   const ls=el("leftScroll");
   split={ startX:e.clientX, startW:ls.getBoundingClientRect().width };
   el("splitter").classList.add('drag'); document.body.style.userSelect='none'; document.body.style.cursor='col-resize';
-  beginInteract(); window.addEventListener('pointermove', onSplitMove); window.addEventListener('pointerup', onSplitUp); window.addEventListener('pointercancel', onSplitUp); // FIX: end on pointercancel too, so the latch/ghost never leak
+  window.addEventListener('pointermove', onSplitMove); window.addEventListener('pointerup', onSplitUp);
 }
 function onSplitMove(e){
   if(!split) return;
@@ -569,8 +580,7 @@ function onSplitMove(e){
   el("leftScroll").style.width=w+"px";
 }
 function onSplitUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
-  window.removeEventListener('pointermove', onSplitMove); window.removeEventListener('pointerup', onSplitUp); window.removeEventListener('pointercancel', onSplitUp); // remove ALL siblings so nothing leaks whichever fired
+  window.removeEventListener('pointermove', onSplitMove); window.removeEventListener('pointerup', onSplitUp);
   if(!split) return;                                 // idempotent: a second invocation is a safe no-op
   document.body.style.userSelect=''; document.body.style.cursor=''; el("splitter").classList.remove('drag');
   const P=proj(); if(P){ P.leftW=Math.round(el("leftScroll").getBoundingClientRect().width); Store.save(); }
@@ -683,7 +693,7 @@ function onProgDragStart(e){
   progDrag={ mid:row.dataset.mid, target:null, ghost:null };
   const g=document.createElement('div'); g.className='progGhost'; g.textContent=row.querySelector('.pmName').textContent;
   document.body.appendChild(g); progDrag.ghost=g; document.body.style.userSelect='none'; mvProgGhost(e);
-  beginInteract(); window.addEventListener('pointermove', onProgDragMove); window.addEventListener('pointerup', onProgDragUp); window.addEventListener('pointercancel', onProgDragUp); // FIX: end on pointercancel too, so the latch/ghost never leak
+  window.addEventListener('pointermove', onProgDragMove); window.addEventListener('pointerup', onProgDragUp);
 }
 function onProgDragMove(e){
   if(!progDrag) return; mvProgGhost(e);
@@ -693,8 +703,7 @@ function onProgDragMove(e){
   if(row && row.dataset.mid!==progDrag.mid){ const rc=row.getBoundingClientRect(); const before=e.clientY<rc.top+rc.height/2; progDrag.target={mid:row.dataset.mid,before}; row.classList.add(before?'pBefore':'pAfter'); }
 }
 function onProgDragUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
-  window.removeEventListener('pointermove', onProgDragMove); window.removeEventListener('pointerup', onProgDragUp); window.removeEventListener('pointercancel', onProgDragUp); // remove ALL siblings so nothing leaks whichever fired
+  window.removeEventListener('pointermove', onProgDragMove); window.removeEventListener('pointerup', onProgDragUp);
   if(!progDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
   if(progDrag.ghost) progDrag.ghost.remove(); clearProgMark();
   const d=progDrag; progDrag=null; if(!d.target) return;
@@ -806,10 +815,6 @@ function moduleOrderSig(mods){ return mods.map(m=>m.id+"~"+(m.parentId==null?"":
 
 /* =====================  RENDER BOARD  ===================== */
 function renderBoard(){
-  // FIX: self-heal the interaction latch. If a drag ended via pointercancel/lostpointercapture
-  // without its *Up handler running, _interacting can stick true and permanently freeze cloud/
-  // storage sync. Clear it whenever a full render happens with no drag object actually in flight.
-  if(_interacting && !drag && !rowDrag && !colDrag && !colResize && !modDrag && !progDrag && !split) endInteract();
   const P=proj(); if(P) normalizeModules(P); renderGrid(); renderTimeline(); updateMeta(); if(el("progressPanel")) renderProgress();
 }
 
@@ -918,6 +923,7 @@ function renderTimeline(){
   el("empty").style.display=P.modules.length?"none":"flex";
   bindBars();
   applyWrap();
+  updateStickyLabels();                                 // apply the sliding-label shift for the current scroll (fresh bars start at transform:'')
 }
 
 /* ---- Wrap Txt: sync chart row heights with (possibly wrapped) left rows ---- */
@@ -965,12 +971,49 @@ function isClipped(inner, container){
   const ir=inner.getBoundingClientRect(), cr=container.getBoundingClientRect();
   return ir.left < cr.left - 0.5 || ir.right > cr.right + 0.5;
 }
-/* A bar label needs the floatTip when its text is truncated inside the bar OR
-   scrolled out of the chart viewport (#rightScroll) so it is not fully visible. */
+/* A bar label needs the floatTip when its text can't be fully read in place. Two cases:
+   (a) it is truncated inside its own box (ellipsis — small bar too narrow for the name);
+   (b) after a sticky shift (updateStickyLabels) the label box is clipped by the bar's
+       right edge OR by the chart viewport edge (scrolled so far the name can't stay in
+       view). The check is on the POST-shift rendered rects: the visible slice is the
+       intersection of the bar's box (overflow:hidden) and #rightScroll's viewport. */
 function labelNeedsTip(lbl){
   if(!lbl) return false;
-  if((lbl.scrollWidth - lbl.clientWidth) > 1) return true;   // truncated (ellipsis)
-  return isClipped(lbl, el('rightScroll'));                  // horizontally out of view
+  if((lbl.scrollWidth - lbl.clientWidth) > 1) return true;   // truncated inside its own box (ellipsis)
+  const bar=lbl.closest('.bar'), R=el('rightScroll');
+  if(!bar || !R) return isClipped(lbl, el('rightScroll'));   // fallback: viewport-only clip
+  const lr=lbl.getBoundingClientRect(), br=bar.getBoundingClientRect(), rr=R.getBoundingClientRect();
+  const clipLeft=Math.max(br.left, rr.left), clipRight=Math.min(br.right, rr.right);
+  return lr.left < clipLeft - 0.5 || lr.right > clipRight + 0.5;
+}
+/* ---- Sliding (sticky-within-bar) Gantt labels ----------------------------------------
+   While a bar's START scrolls off the LEFT edge of #rightScroll but the bar is still
+   partly visible, translate its .blabel RIGHT so the task name stays pinned just inside
+   the visible left edge (you can still read which task the bar is). Clamp once the label
+   would leave the bar's RIGHT edge — past that it clips and labelNeedsTip()'s hover bubble
+   takes over. Small bars (label wider than the bar) clamp to shift 0 and keep today's
+   ellipsis + hover-bubble behavior. Cheap: one pass over the bars, safe on every rAF frame.
+   .blabel has pointer-events:none, so the transform never affects drag hit-testing, and no
+   bar geometry / left|width is touched. */
+function updateStickyLabels(){
+  const R=el('rightScroll'); if(!R) return;
+  const layer=el('rowsLayer'); if(!layer) return;
+  const vpLeft=R.scrollLeft, vpRight=vpLeft+R.clientWidth, PAD=9;   // PAD matches .bar's left padding
+  layer.querySelectorAll('.bar').forEach(bar=>{
+    const lbl=bar.querySelector('.blabel'); if(!lbl) return;
+    const barLeft=parseFloat(bar.style.left)||0;
+    const barW=parseFloat(bar.style.width)||bar.offsetWidth;
+    if(barLeft+barW < vpLeft || barLeft > vpRight){ if(lbl.style.transform) lbl.style.transform=''; return; } // fully off-viewport
+    const labelW=lbl.scrollWidth;
+    let shift=vpLeft-barLeft;                                       // move the label start to the viewport-left edge
+    shift=Math.max(0, Math.min(shift, barW-labelW-2*PAD));         // never before bar start; never past bar's right edge
+    lbl.style.transform = shift>0 ? ('translateX('+shift+'px)') : '';
+  });
+}
+let _stickyRAF=0;
+function scheduleStickyLabels(){                                    // coalesce a scroll burst into one update per frame
+  if(_stickyRAF) return;
+  _stickyRAF=requestAnimationFrame(()=>{ _stickyRAF=0; updateStickyLabels(); });
 }
 function onBoardOver(e){
   const t=e.target;
@@ -1235,7 +1278,7 @@ function onBarDown(e){
   const mi=+bar.dataset.mi, fi=+bar.dataset.fi, f=P.modules[mi].features[fi], r=getRange(), ppd=pxPerDay();
   drag={bar,mode,mi,fi,f,ppd,rStart:r.start,startX:e.clientX,oS:daysBetween(r.start,f.start),oE:daysBetween(r.start,f.end)};
   bar.classList.add('dragging'); bar.setPointerCapture(e.pointerId); document.body.style.userSelect='none';
-  beginInteract(); window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp); window.addEventListener('pointercancel', onBarUp); e.preventDefault(); // FIX: end on pointercancel too, so the latch/ghost never leak
+  window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp); e.preventDefault();
 }
 function onBarMove(e){
   if(!drag) return; const delta=Math.round((e.clientX-drag.startX)/drag.ppd); let s=drag.oS, en=drag.oE;
@@ -1246,7 +1289,7 @@ function onBarMove(e){
   const ei=el("leftBody").querySelector(`input[data-mi="${drag.mi}"][data-fi="${drag.fi}"][data-field="end"]`);
   if(si) si.value=ns; if(ei) ei.value=ne; drag._s=ns; drag._e=ne;
 }
-function onBarUp(){ endInteract(); window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); window.removeEventListener('pointercancel', onBarUp); if(!drag) return; document.body.style.userSelect=''; if(drag._s){ drag.f.start=drag._s; drag.f.end=drag._e; Store.save(); } drag.bar.classList.remove('dragging'); drag=null; renderTimeline(); } // FIX: clear latch + remove ALL siblings on pointerup OR pointercancel; idempotent no-op if drag already cleared
+function onBarUp(){ window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); if(!drag) return; document.body.style.userSelect=''; if(drag._s){ drag.f.start=drag._s; drag.f.end=drag._e; Store.save(); } drag.bar.classList.remove('dragging'); drag=null; renderTimeline(); } // idempotent: a second invocation is a safe no-op
 
 /* =====================  ROW DRAG-REORDER  ===================== */
 let rowDrag=null;
@@ -1258,7 +1301,7 @@ function onRowDragStart(e){
   const g=featEl.cloneNode(true); g.classList.add('rowGhost'); g.style.pointerEvents='none'; g.style.width=featEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
   document.body.appendChild(g); rowDrag.ghost=g; document.body.style.userSelect='none';
   rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
-  beginInteract(); window.addEventListener('pointermove', onRowDragMove); window.addEventListener('pointerup', onRowDragUp); window.addEventListener('pointercancel', onRowDragUp); // FIX: end on pointercancel too, so the latch/ghost/rAF never leak
+  window.addEventListener('pointermove', onRowDragMove); window.addEventListener('pointerup', onRowDragUp);
 }
 /* Hit-test the point (x,y) and mark the drop target: over a featRow → insert
    before/after it; over a module header or a collapsed module → insert at top;
@@ -1284,6 +1327,7 @@ function onRowDragMove(e){
    (and keep the right pane in vertical sync) so distant modules stay reachable. */
 function rowDragAutoScroll(){
   if(!rowDrag) return;
+  if(!_dragging){ rowDrag.target=null; onRowDragUp(); return; }  // drag cancelled (e.g. pointercancel): abort + tear down, stop autoscroll
   const ls=el('leftScroll');
   if(ls){
     const r=ls.getBoundingClientRect(), EDGE=52, MAX=20, y=rowDrag.lastY; let dv=0;
@@ -1298,8 +1342,7 @@ function rowDragAutoScroll(){
   rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
 }
 function onRowDragUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
-  window.removeEventListener('pointermove', onRowDragMove); window.removeEventListener('pointerup', onRowDragUp); window.removeEventListener('pointercancel', onRowDragUp); // remove ALL siblings so nothing leaks whichever fired
+  window.removeEventListener('pointermove', onRowDragMove); window.removeEventListener('pointerup', onRowDragUp);
   if(!rowDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
   if(rowDrag.raf) cancelAnimationFrame(rowDrag.raf);
   if(rowDrag.ghost) rowDrag.ghost.remove(); clearDrop();
@@ -1338,7 +1381,7 @@ function onModDragStart(e){
   const g=modEl.cloneNode(true); g.classList.add('modGhost'); g.style.pointerEvents='none'; g.style.width=modEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
   document.body.appendChild(g); modDrag.ghost=g; document.body.style.userSelect='none';
   modDrag.raf=requestAnimationFrame(modDragAutoScroll);
-  beginInteract(); window.addEventListener('pointermove', onModDragMove); window.addEventListener('pointerup', onModDragUp); window.addEventListener('pointercancel', onModDragUp); // FIX3: module drag latches interaction so cloud/storage sync defers; FIX: end on pointercancel too, so the latch/ghost/rAF never leak
+  window.addEventListener('pointermove', onModDragMove); window.addEventListener('pointerup', onModDragUp);
 }
 function onModDragMove(e){
   if(!modDrag) return;
@@ -1377,6 +1420,7 @@ function modDragEval(x,y){
 /* Edge auto-scroll the left pane while dragging; keep the right pane's scrollTop mirrored. */
 function modDragAutoScroll(){
   if(!modDrag) return;
+  if(!_dragging){ modDrag.target=null; onModDragUp(); return; }  // drag cancelled (e.g. pointercancel): abort + tear down, stop autoscroll
   const ls=el('leftScroll');
   if(ls){
     const r=ls.getBoundingClientRect(), EDGE=52, MAX=20, y=modDrag.lastY; let dv=0;
@@ -1391,8 +1435,7 @@ function modDragAutoScroll(){
   modDrag.raf=requestAnimationFrame(modDragAutoScroll);
 }
 function onModDragUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
-  window.removeEventListener('pointermove', onModDragMove); window.removeEventListener('pointerup', onModDragUp); window.removeEventListener('pointercancel', onModDragUp); // remove ALL siblings so nothing leaks whichever fired
+  window.removeEventListener('pointermove', onModDragMove); window.removeEventListener('pointerup', onModDragUp);
   if(!modDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
   if(modDrag.raf) cancelAnimationFrame(modDrag.raf);
   if(modDrag.ghost) modDrag.ghost.remove(); clearModDrop();
@@ -1456,7 +1499,7 @@ function onColDragStart(e){
   const head=e.currentTarget; if(!head.dataset.key) return;
   colDrag={ key:head.dataset.key, head, target:null, ghost:null, startX:e.clientX, moved:false };
   document.body.style.userSelect='none';
-  beginInteract(); window.addEventListener('pointermove', onColDragMove); window.addEventListener('pointerup', onColDragUp); window.addEventListener('pointercancel', onColDragUp); // FIX: end on pointercancel too, so the latch/ghost never leak
+  window.addEventListener('pointermove', onColDragMove); window.addEventListener('pointerup', onColDragUp);
 }
 function onColDragMove(e){
   if(!colDrag) return;
@@ -1473,8 +1516,7 @@ function onColDragMove(e){
   }
 }
 function onColDragUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
-  window.removeEventListener('pointermove', onColDragMove); window.removeEventListener('pointerup', onColDragUp); window.removeEventListener('pointercancel', onColDragUp); // remove ALL siblings so nothing leaks whichever fired
+  window.removeEventListener('pointermove', onColDragMove); window.removeEventListener('pointerup', onColDragUp);
   if(!colDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
   if(colDrag.ghost) colDrag.ghost.remove(); clearColMark();
   const d=colDrag; colDrag=null; if(!d.moved||!d.target) return;
@@ -1497,7 +1539,7 @@ function onColResizeStart(e){
   colResize={ key:head.dataset.key, head, idx, handle:e.target, startX:e.clientX, startW:head.getBoundingClientRect().width, w:0 };
   e.target.classList.add('dragging');
   document.body.style.userSelect='none'; document.body.style.cursor='col-resize'; hideTip();
-  beginInteract(); window.addEventListener('pointermove', onColResizeMove); window.addEventListener('pointerup', onColResizeUp); window.addEventListener('pointercancel', onColResizeUp); // FIX: end on pointercancel too, so the latch never leaks
+  window.addEventListener('pointermove', onColResizeMove); window.addEventListener('pointerup', onColResizeUp);
 }
 function onColResizeMove(e){
   if(!colResize) return;
@@ -1511,8 +1553,7 @@ function onColResizeMove(e){
   if(ui.wrapTxt) syncRowHeights();                   // content-driven row height follows the new width live
 }
 function onColResizeUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
-  window.removeEventListener('pointermove', onColResizeMove); window.removeEventListener('pointerup', onColResizeUp); window.removeEventListener('pointercancel', onColResizeUp); // remove ALL siblings so nothing leaks whichever fired
+  window.removeEventListener('pointermove', onColResizeMove); window.removeEventListener('pointerup', onColResizeUp);
   if(!colResize) return;                             // idempotent: a second invocation is a safe no-op
   document.body.style.userSelect=''; document.body.style.cursor='';
   if(colResize.handle) colResize.handle.classList.remove('dragging');
@@ -1607,6 +1648,7 @@ async function exportPng(){
   if(typeof html2canvas==="undefined"){ toast("ไลบรารี PNG โหลดไม่สำเร็จ (ต้องต่ออินเทอร์เน็ต)"); return; }
   const board=el("board"), L=el("leftScroll"), R=el("rightScroll");
   const pl=L.scrollTop, pr=R.scrollLeft; L.scrollTop=R.scrollTop=0; R.scrollLeft=0;
+  updateStickyLabels();                                 // scroll is reset to 0 → clears sliding-label shifts so the snapshot shows labels at bar starts
   board.classList.add('exporting');
   const w=board.scrollWidth, h=Math.max(el("leftBody").scrollHeight, el("bars").scrollHeight)+el("leftHead").offsetHeight+4;
   toast("กำลังสร้างภาพ PNG…");
@@ -1614,7 +1656,7 @@ async function exportPng(){
     const c=await html2canvas(board,{backgroundColor:"#ffffff",scale:2,width:w,height:h,windowWidth:w+40,windowHeight:h+40,scrollX:0,scrollY:0,logging:false});
     const a=document.createElement('a'); a.download=safeName(proj().code||proj().name)+"_Timeline.png"; a.href=c.toDataURL("image/png"); a.click(); toast("ส่งออก PNG แล้ว");
   }catch(err){ console.error(err); toast("สร้าง PNG ไม่สำเร็จ"); }
-  finally{ board.classList.remove('exporting'); L.scrollTop=R.scrollTop=pl; R.scrollLeft=pr; }
+  finally{ board.classList.remove('exporting'); L.scrollTop=R.scrollTop=pl; R.scrollLeft=pr; updateStickyLabels(); } // restore scroll → re-apply the slide immediately
 }
 
 /* =====================  MODAL / TOAST  ===================== */
@@ -1722,6 +1764,7 @@ async function backupModal(){
 /* =====================  INIT  ===================== */
 Store.load();
 route();
+wireDragGuard();                                       // one centralized capture-phase pointerdown/up/cancel guard for background-sync deferral
 window.addEventListener('hashchange', route);
 window.addEventListener('storage', e=>{ if(e.key===LS_KEY && !editingNow()){ Store.load(); route(); } }); // FIX: don't reload/re-render from a cross-tab write while a drag/resize or edit is in flight
 if(cloudOn()){ cloudSync(); window.addEventListener('focus', ()=>cloudPull(false)); setInterval(()=>cloudPull(false), 30000); }

@@ -15,6 +15,10 @@ New module-management features (built on top of the integrity fixes above):
   parent promotes its sub-modules to main.
 - **Tree lines (2.2.2):** sub-modules render a connector rail + elbow from their
   parent in the left grid.
+- **Sliding bar labels:** a timeline bar whose start scrolls off the left keeps its
+  label pinned to the visible left edge (sliding as you scroll); when the visible
+  slice is too small for the label, the hover floating bubble takes over. Bars too
+  small to ever fit their label keep the hover bubble.
 - **Step indentation (2.4):** features under modules and sub-modules are indented
   by hierarchy level. Excel export shows `Parent › Sub`; the progress panel
   prefixes sub-modules with `↳`.
