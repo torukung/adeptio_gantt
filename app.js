@@ -52,6 +52,8 @@ function today(){ const t=new Date(); return new Date(t.getFullYear(),t.getMonth
 const LS_UI = "adeptio_ptrack_ui";
 const ui = { zoom:"week", cal:"CE", wrapTxt:false, colW:{} };
 try{ const _u=JSON.parse(localStorage.getItem(LS_UI)||"{}"); if(_u && typeof _u==="object"){ if("wrapTxt" in _u) ui.wrapTxt=!!_u.wrapTxt; if(_u.colW && typeof _u.colW==="object") ui.colW=_u.colW; } }catch(e){}
+/* FIX: colW is now namespaced per project ({pid:{key:w}}). Drop any legacy flat {key:w} (numeric top-level values) so old widths can't bleed across projects or corrupt the nested shape. */
+if(ui.colW && Object.keys(ui.colW).some(k=>typeof ui.colW[k]==="number")) ui.colW={};
 function saveUi(){ try{ localStorage.setItem(LS_UI, JSON.stringify({wrapTxt:!!ui.wrapTxt, colW:ui.colW||{}})); }catch(e){} }
 function dispYear(d){ return ui.cal==="BE" ? d.getFullYear()+543 : d.getFullYear(); }
 function monName(mi){ return ui.cal==="BE" ? TH_MON[mi] : EN_MON[mi]; }
@@ -87,7 +89,7 @@ const IC = {
 /* =====================  STORE (local-first, optional cloud sync)  ===== */
 const LS_KEY = "adeptio_ptrack_v2";
 const LS_REV = "adeptio_ptrack_rev";
-let MEM = null, DB = null;
+let MEM = null, DB = null, _lsWarned = false;
 function safeGet(){ try{ return localStorage.getItem(LS_KEY); }catch(e){ return null; } }
 function safeSet(v){ try{ localStorage.setItem(LS_KEY,v); return true; }catch(e){ return false; } }
 
@@ -110,21 +112,36 @@ const Store = {
     if(!DB){ DB = MEM || seedDB(); }
     MEM = DB; return DB;
   },
-  save(){ const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; } if(cloudOn()) schedulePush(); }
+  save(){ const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); } // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
 };
 function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
 
 /* ---- cloud sync engine: local-first; the Worker's `rev` is the tiebreaker ---- */
-let pushTimer=null, pushPending=false;
+let pushTimer=null, pushPending=false, pushFails=0;
+/* Pointer-interaction latch: while a drag/resize is in flight, background cloud/
+   storage sync must NOT re-render or adopt a remote doc (that would corrupt the
+   drag). editingNow() consults this so cloudPull + the storage listener defer. */
+let _interacting=false;
+function isInteracting(){ return _interacting; }
+function beginInteract(){ _interacting=true; }
+function endInteract(){ _interacting=false; }
+function cloudSyncState(){ return { pushPending:pushPending, interacting:_interacting }; } // diagnostic surface (used by tests)
 function schedulePush(){ pushPending=true; clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, 800); }
 async function cloudPush(){
   if(!cloudOn()) return;
   try{
     const res = await fetch(apiUrl("/api/state"), { method:"PUT", headers:apiHeaders(), body:JSON.stringify({doc:DB}) });
-    if(res.ok){ const j=await res.json(); if(j && typeof j.rev==="number") setLsRev(j.rev); pushPending=false; }
-  }catch(e){ /* offline → localStorage holds the change; retried on next save */ }
+    if(res.ok){ const j=await res.json(); if(j && typeof j.rev==="number") setLsRev(j.rev); pushPending=false; pushFails=0; return; }
+    onPushFail();                                    // FIX: server rejected → clear latch + backoff retry (never leave pushPending stuck)
+  }catch(e){ onPushFail(); }                          // FIX: offline/blocked → clear latch + backoff retry
+}
+function onPushFail(){                                // FIX: clearing pushPending stops a failed push from permanently blocking cloudPull adoption
+  pushPending=false;
+  const delay=Math.min(5000*(1<<Math.min(pushFails++,4)), 60000);
+  clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, delay);
 }
 function editingNow(){
+  if(_interacting) return true;               // FIX: never adopt a remote doc while a drag/resize is in flight
   const a=document.activeElement;
   if(a && (a.tagName==="TEXTAREA" || a.tagName==="INPUT" || a.isContentEditable)) return true;
   if(el("modalRoot") && el("modalRoot").style.display==="block") return true;
@@ -541,7 +558,7 @@ function onSplitDown(e){
   const ls=el("leftScroll");
   split={ startX:e.clientX, startW:ls.getBoundingClientRect().width };
   el("splitter").classList.add('drag'); document.body.style.userSelect='none'; document.body.style.cursor='col-resize';
-  window.addEventListener('pointermove', onSplitMove); window.addEventListener('pointerup', onSplitUp, {once:true});
+  beginInteract(); window.addEventListener('pointermove', onSplitMove); window.addEventListener('pointerup', onSplitUp, {once:true});
 }
 function onSplitMove(e){
   if(!split) return;
@@ -551,6 +568,7 @@ function onSplitMove(e){
   el("leftScroll").style.width=w+"px";
 }
 function onSplitUp(){
+  endInteract();                                     // FIX: clear the interaction latch when the drag ends
   if(!split) return; window.removeEventListener('pointermove', onSplitMove);
   document.body.style.userSelect=''; document.body.style.cursor=''; el("splitter").classList.remove('drag');
   const P=proj(); if(P){ P.leftW=Math.round(el("leftScroll").getBoundingClientRect().width); Store.save(); }
@@ -566,7 +584,7 @@ function renderSummary(){
         <span class="eyebrow">Project Status</span>
         <span class="lab">สรุปสถานะโครงการ</span>
         <span class="grow"></span>
-        <span class="sumDateWrap">วันที่อัปเดต <input type="date" id="sumDate" value="${cur.date||iso(today())}"/></span>
+        <span class="sumDateWrap">วันที่อัปเดต <input type="date" id="sumDate" value="${esc(cur.date||iso(today()))}"/></span>
         <button class="btn sm" id="goTimeline" title="ไปหน้าไทม์ไลน์และ Gantt">ไทม์ไลน์โครงการ ${IC.arrow}</button>
       </div>
       <textarea id="sumText" maxlength="1000" placeholder="พิมพ์สรุปสถานะล่าสุด (สูงสุด 1,000 ตัวอักษร)…">${esc(cur.text||"")}</textarea>
@@ -582,6 +600,7 @@ function renderSummary(){
   const ta=el("sumText"), ctr=el("sumCount");
   const upd=()=>{ ctr.textContent=ta.value.length+" / 1000"; ctr.classList.toggle('warn', ta.value.length>=950); };
   upd(); ta.oninput=upd;
+  ta.onblur = ()=>{ if(cur.text!==ta.value){ cur.text=ta.value; Store.save(); } }; // FIX: persist unsaved summary text on blur (no toast) so navigation never drops it
   el("sumSave").onclick = ()=>{ cur.text=ta.value; cur.date=el("sumDate").value||cur.date; P.updatedAt=iso(today()); Store.save(); toast("บันทึกสรุปแล้ว"); };
   el("sumDate").onchange = ()=>{ cur.date=el("sumDate").value; Store.save(); };
   el("sumNew").onclick = ()=>{
@@ -590,7 +609,7 @@ function renderSummary(){
     P.summary.current={id:nid(), date:iso(today()), text:""};
     Store.save(); renderSummary(); toast("เก็บเข้าประวัติแล้ว เริ่มอัปเดตใหม่");
   };
-  el("sumHist").onclick = ()=>{ location.hash="project="+PID+"&view=history"; };
+  el("sumHist").onclick = ()=>{ if(cur.text!==ta.value){ cur.text=ta.value; Store.save(); } location.hash="project="+PID+"&view=history"; }; // FIX: save current summary text before hash-nav to the history overlay
   const gt=el("goTimeline"); if(gt) gt.onclick=()=> switchTab("timeline");
   renderProgress();
 }
@@ -662,7 +681,7 @@ function onProgDragStart(e){
   progDrag={ mid:row.dataset.mid, target:null, ghost:null };
   const g=document.createElement('div'); g.className='progGhost'; g.textContent=row.querySelector('.pmName').textContent;
   document.body.appendChild(g); progDrag.ghost=g; document.body.style.userSelect='none'; mvProgGhost(e);
-  window.addEventListener('pointermove', onProgDragMove); window.addEventListener('pointerup', onProgDragUp, {once:true});
+  beginInteract(); window.addEventListener('pointermove', onProgDragMove); window.addEventListener('pointerup', onProgDragUp, {once:true});
 }
 function onProgDragMove(e){
   if(!progDrag) return; mvProgGhost(e);
@@ -672,6 +691,7 @@ function onProgDragMove(e){
   if(row && row.dataset.mid!==progDrag.mid){ const rc=row.getBoundingClientRect(); const before=e.clientY<rc.top+rc.height/2; progDrag.target={mid:row.dataset.mid,before}; row.classList.add(before?'pBefore':'pAfter'); }
 }
 function onProgDragUp(){
+  endInteract();                                     // FIX: clear the interaction latch when the drag ends
   if(!progDrag) return; window.removeEventListener('pointermove', onProgDragMove); document.body.style.userSelect='';
   if(progDrag.ghost) progDrag.ghost.remove(); clearProgMark();
   const d=progDrag; progDrag=null; if(!d.target) return;
@@ -687,7 +707,7 @@ function showHistory(){
   const entries=[{...P.summary.current,_cur:true}].concat(P.summary.history.map(h=>({...h})));
   const items=entries.map(e=>`
     <div class="histItem ${e._cur?'cur':''}" data-id="${e.id}" data-cur="${e._cur?1:0}">
-      <div class="top">${e._cur?'<span class="badge">ปัจจุบัน</span>':''}<input type="date" value="${e.date||''}" data-f="date"/><span class="grow"></span>${e._cur?'':`<button class="iconbtn danger" data-act="delhist" title="ลบ">${IC.trash}</button>`}</div>
+      <div class="top">${e._cur?'<span class="badge">ปัจจุบัน</span>':''}<input type="date" value="${esc(e.date||'')}" data-f="date"/><span class="grow"></span>${e._cur?'':`<button class="iconbtn danger" data-act="delhist" title="ลบ">${IC.trash}</button>`}</div>
       <textarea maxlength="1000" data-f="text">${esc(e.text||"")}</textarea>
       <div class="row2"><span class="ctr"></span><span class="grow"></span><button class="btn sm" data-act="savehist">บันทึก</button></div>
     </div>`).join("");
@@ -736,8 +756,9 @@ function allCols(){
     let c;
     if(k.startsWith("c:")){ const cc=P.customCols.find(x=>("c:"+x.id)===k); c={key:k,label:cc.label,w:cc.w,kind:cc.kind,custom:cc.id,del:true}; }
     else c={...BASE_COLDEFS[k]};
-    // local-only width override (ui.colW) — never written back to the doc/customCols
-    if(ui.colW && ui.colW[k]!=null){ const ov=+ui.colW[k]; if(!isNaN(ov)) c.w=Math.max(60,Math.min(640,ov)); }
+    // local-only width override (ui.colW), namespaced per project — never written back to the doc/customCols
+    const _pw=ui.colW && ui.colW[PID];               // FIX: read this project's widths only, so resizes don't bleed across projects
+    if(_pw && _pw[k]!=null){ const ov=+_pw[k]; if(!isNaN(ov)) c.w=Math.max(60,Math.min(640,ov)); }
     return c;
   });
 }
@@ -789,7 +810,7 @@ function renderGrid(){
               <span class="rowActs"><button class="iconbtn" data-act="up" title="เลื่อนขึ้น">${IC.up}</button><button class="iconbtn" data-act="down" title="เลื่อนลง">${IC.down}</button><button class="iconbtn danger" data-act="delfeat" title="ลบฟีเจอร์">${IC.trash}</button></span></div>`;
           } else if(c.kind==="date"){
             const dval=c.custom?(f.custom[c.custom]||""):(f[c.key]||"");
-            html += `<div class="cell" style="width:${c.w}px"><input type="date" value="${dval}" data-mi="${mi}" data-fi="${fi}" data-field="${c.key}" /></div>`;
+            html += `<div class="cell" style="width:${c.w}px"><input type="date" value="${esc(dval)}" data-mi="${mi}" data-fi="${fi}" data-field="${c.key}" /></div>`;
           } else if(c.kind==="status"){
             const st=stById(f.status);
             const opts=STATUS.map(s=>`<option value="${s.id}" ${s.id===f.status?'selected':''}>${s.th}</option>`).join("");
@@ -1025,8 +1046,8 @@ function featureModal(mi, fi){
     <div class="field"><label>ชื่อฟีเจอร์ · Feature name</label><input type="text" id="fm_name" value="${esc(f.name||"")}" placeholder="ตั้งชื่อฟีเจอร์…"/></div>
     <div class="field"><label>คำอธิบาย · Description</label><textarea id="fm_desc" placeholder="อธิบายสั้น ๆ (ไม่บังคับ)">${esc(f.description||"")}</textarea></div>
     <div class="field2">
-      <div class="field"><label>วันเริ่ม · Start</label><input type="date" id="fm_start" value="${f.start||iso(t)}"/></div>
-      <div class="field"><label>วันสิ้นสุด · End</label><input type="date" id="fm_end" value="${f.end||iso(addDays(t,7))}"/></div>
+      <div class="field"><label>วันเริ่ม · Start</label><input type="date" id="fm_start" value="${esc(f.start||iso(t))}"/></div>
+      <div class="field"><label>วันสิ้นสุด · End</label><input type="date" id="fm_end" value="${esc(f.end||iso(addDays(t,7)))}"/></div>
     </div>
     <div class="field"><label>หมายเหตุ · Remark</label><input type="text" id="fm_remark" value="${esc(f.remark||"")}" placeholder="หมายเหตุ (ไม่บังคับ)"/></div>
     <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="fm_save">${editing?"บันทึก":"เพิ่มฟีเจอร์"}</button></div>`);
@@ -1141,7 +1162,7 @@ function onBarDown(e){
   const mi=+bar.dataset.mi, fi=+bar.dataset.fi, f=P.modules[mi].features[fi], r=getRange(), ppd=pxPerDay();
   drag={bar,mode,mi,fi,f,ppd,rStart:r.start,startX:e.clientX,oS:daysBetween(r.start,f.start),oE:daysBetween(r.start,f.end)};
   bar.classList.add('dragging'); bar.setPointerCapture(e.pointerId); document.body.style.userSelect='none';
-  window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp, {once:true}); e.preventDefault();
+  beginInteract(); window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp, {once:true}); e.preventDefault();
 }
 function onBarMove(e){
   if(!drag) return; const delta=Math.round((e.clientX-drag.startX)/drag.ppd); let s=drag.oS, en=drag.oE;
@@ -1152,7 +1173,7 @@ function onBarMove(e){
   const ei=el("leftBody").querySelector(`input[data-mi="${drag.mi}"][data-fi="${drag.fi}"][data-field="end"]`);
   if(si) si.value=ns; if(ei) ei.value=ne; drag._s=ns; drag._e=ne;
 }
-function onBarUp(){ if(!drag) return; window.removeEventListener('pointermove', onBarMove); document.body.style.userSelect=''; if(drag._s){ drag.f.start=drag._s; drag.f.end=drag._e; Store.save(); } drag.bar.classList.remove('dragging'); drag=null; renderTimeline(); }
+function onBarUp(){ endInteract(); if(!drag) return; window.removeEventListener('pointermove', onBarMove); document.body.style.userSelect=''; if(drag._s){ drag.f.start=drag._s; drag.f.end=drag._e; Store.save(); } drag.bar.classList.remove('dragging'); drag=null; renderTimeline(); }
 
 /* =====================  ROW DRAG-REORDER  ===================== */
 let rowDrag=null;
@@ -1164,7 +1185,7 @@ function onRowDragStart(e){
   const g=featEl.cloneNode(true); g.classList.add('rowGhost'); g.style.pointerEvents='none'; g.style.width=featEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
   document.body.appendChild(g); rowDrag.ghost=g; document.body.style.userSelect='none';
   rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
-  window.addEventListener('pointermove', onRowDragMove); window.addEventListener('pointerup', onRowDragUp, {once:true});
+  beginInteract(); window.addEventListener('pointermove', onRowDragMove); window.addEventListener('pointerup', onRowDragUp, {once:true});
 }
 /* Hit-test the point (x,y) and mark the drop target: over a featRow → insert
    before/after it; over a module header or a collapsed module → insert at top;
@@ -1204,6 +1225,7 @@ function rowDragAutoScroll(){
   rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
 }
 function onRowDragUp(){
+  endInteract();                                     // FIX: clear the interaction latch when the drag ends
   if(!rowDrag) return; window.removeEventListener('pointermove', onRowDragMove); document.body.style.userSelect='';
   if(rowDrag.raf) cancelAnimationFrame(rowDrag.raf);
   if(rowDrag.ghost) rowDrag.ghost.remove(); clearDrop();
@@ -1227,7 +1249,7 @@ function onColDragStart(e){
   const head=e.currentTarget; if(!head.dataset.key) return;
   colDrag={ key:head.dataset.key, head, target:null, ghost:null, startX:e.clientX, moved:false };
   document.body.style.userSelect='none';
-  window.addEventListener('pointermove', onColDragMove); window.addEventListener('pointerup', onColDragUp, {once:true});
+  beginInteract(); window.addEventListener('pointermove', onColDragMove); window.addEventListener('pointerup', onColDragUp, {once:true});
 }
 function onColDragMove(e){
   if(!colDrag) return;
@@ -1244,6 +1266,7 @@ function onColDragMove(e){
   }
 }
 function onColDragUp(){
+  endInteract();                                     // FIX: clear the interaction latch when the drag ends
   if(!colDrag) return; window.removeEventListener('pointermove', onColDragMove); document.body.style.userSelect='';
   if(colDrag.ghost) colDrag.ghost.remove(); clearColMark();
   const d=colDrag; colDrag=null; if(!d.moved||!d.target) return;
@@ -1266,7 +1289,7 @@ function onColResizeStart(e){
   colResize={ key:head.dataset.key, head, idx, handle:e.target, startX:e.clientX, startW:head.getBoundingClientRect().width, w:0 };
   e.target.classList.add('dragging');
   document.body.style.userSelect='none'; document.body.style.cursor='col-resize'; hideTip();
-  window.addEventListener('pointermove', onColResizeMove); window.addEventListener('pointerup', onColResizeUp, {once:true});
+  beginInteract(); window.addEventListener('pointermove', onColResizeMove); window.addEventListener('pointerup', onColResizeUp, {once:true});
 }
 function onColResizeMove(e){
   if(!colResize) return;
@@ -1280,11 +1303,12 @@ function onColResizeMove(e){
   if(ui.wrapTxt) syncRowHeights();                   // content-driven row height follows the new width live
 }
 function onColResizeUp(){
+  endInteract();                                     // FIX: clear the interaction latch when the drag ends
   if(!colResize) return; window.removeEventListener('pointermove', onColResizeMove);
   document.body.style.userSelect=''; document.body.style.cursor='';
   if(colResize.handle) colResize.handle.classList.remove('dragging');
   const w=colResize.w || Math.round(colResize.head.getBoundingClientRect().width);
-  if(w){ ui.colW=ui.colW||{}; ui.colW[colResize.key]=w; saveUi(); }
+  if(w){ ui.colW=ui.colW||{}; (ui.colW[PID]=ui.colW[PID]||{})[colResize.key]=w; saveUi(); } // FIX: write width under the current project id (per-project namespace)
   colResize=null;
   renderGrid(); renderTimeline(); applyWrap();        // settle: re-render both panes and re-sync heights
 }
@@ -1486,7 +1510,7 @@ async function backupModal(){
 Store.load();
 route();
 window.addEventListener('hashchange', route);
-window.addEventListener('storage', e=>{ if(e.key===LS_KEY){ Store.load(); route(); } });
+window.addEventListener('storage', e=>{ if(e.key===LS_KEY && !editingNow()){ Store.load(); route(); } }); // FIX: don't reload/re-render from a cross-tab write while a drag/resize or edit is in flight
 if(cloudOn()){ cloudSync(); window.addEventListener('focus', ()=>cloudPull(false)); setInterval(()=>cloudPull(false), 30000); }
 document.addEventListener('keydown', e=>{
   if(e.key==="Escape"){

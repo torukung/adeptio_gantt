@@ -1,4 +1,26 @@
-# Changelog — Adeptio Project Tracking
+# Changelog
+
+## v1.0.3 — Integrity fixes (pre-feature hardening)
+
+Security & data-safety fixes applied to the v1.0.2 baseline **before** the new
+module features, each confirmed by adversarial verification and covered by a
+Playwright regression test:
+
+- **XSS (major):** date values interpolated into `value="…"` are now `esc()`-escaped
+  at all five sinks (grid date cell, feature modal start/end, summary date, history
+  date). Blocks stored/DOM XSS from a restored or cloud-synced document.
+- **Summary loss (major):** the Status & Summary textarea now autosaves on blur and
+  before navigating to History, so typed text is never dropped.
+- **Mid-drag sync (major):** an interaction latch (`isInteracting`) defers cloud
+  pull / cross-tab adoption while any drag or resize is in flight, preventing a
+  background sync from corrupting an in-progress drag.
+- **Push retry (minor):** a failed cloud push no longer latches `pushPending`; it
+  clears and retries with capped backoff.
+- **Silent storage failure (minor):** a `localStorage` write failure now surfaces a
+  toast instead of losing data silently.
+- **Column-width bleed (minor):** column widths are namespaced per project, so a
+  resize in one project no longer changes another.
+ — Adeptio Project Tracking
 
 All notable changes to the blueprint are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); dates in CE.
