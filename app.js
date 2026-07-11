@@ -52,6 +52,8 @@ function today(){ const t=new Date(); return new Date(t.getFullYear(),t.getMonth
 const LS_UI = "adeptio_ptrack_ui";
 const ui = { zoom:"week", cal:"CE", wrapTxt:false, colW:{} };
 try{ const _u=JSON.parse(localStorage.getItem(LS_UI)||"{}"); if(_u && typeof _u==="object"){ if("wrapTxt" in _u) ui.wrapTxt=!!_u.wrapTxt; if(_u.colW && typeof _u.colW==="object") ui.colW=_u.colW; } }catch(e){}
+/* FIX: colW is now namespaced per project ({pid:{key:w}}). Drop any legacy flat {key:w} (numeric top-level values) so old widths can't bleed across projects or corrupt the nested shape. */
+if(ui.colW && Object.keys(ui.colW).some(k=>typeof ui.colW[k]==="number")) ui.colW={};
 function saveUi(){ try{ localStorage.setItem(LS_UI, JSON.stringify({wrapTxt:!!ui.wrapTxt, colW:ui.colW||{}})); }catch(e){} }
 function dispYear(d){ return ui.cal==="BE" ? d.getFullYear()+543 : d.getFullYear(); }
 function monName(mi){ return ui.cal==="BE" ? TH_MON[mi] : EN_MON[mi]; }
@@ -87,7 +89,7 @@ const IC = {
 /* =====================  STORE (local-first, optional cloud sync)  ===== */
 const LS_KEY = "adeptio_ptrack_v2";
 const LS_REV = "adeptio_ptrack_rev";
-let MEM = null, DB = null;
+let MEM = null, DB = null, _lsWarned = false;
 function safeGet(){ try{ return localStorage.getItem(LS_KEY); }catch(e){ return null; } }
 function safeSet(v){ try{ localStorage.setItem(LS_KEY,v); return true; }catch(e){ return false; } }
 
@@ -110,21 +112,47 @@ const Store = {
     if(!DB){ DB = MEM || seedDB(); }
     MEM = DB; return DB;
   },
-  save(){ const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; } if(cloudOn()) schedulePush(); }
+  save(){ const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); } // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
 };
 function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
 
 /* ---- cloud sync engine: local-first; the Worker's `rev` is the tiebreaker ---- */
-let pushTimer=null, pushPending=false;
+let pushTimer=null, pushPending=false, pushFails=0;
+/* Centralized drag guard (replaces the old per-handler interaction latch): while ANY
+   pointer drag/resize is in flight, background cloud/storage sync must NOT re-render
+   or adopt a remote doc (that would corrupt the drag). ONE capture-phase pointerdown
+   latches _dragging when the press lands on a drag handle; a capture-phase pointerup/
+   pointercancel ALWAYS fires (even under setPointerCapture) and clears it — so the
+   guard can never stick and needs no self-heal. editingNow() consults it so cloudPull
+   + the storage listener defer. Wired exactly once at startup (see wireDragGuard). */
+let _dragging=false;
+const _DRAG_SEL='.bar,.grip,.colHead,.colResize,#splitter,.pgrip,.modGrip';
+function isInteracting(){ return _dragging; }                                         // compat shim (tests): true while a drag is live
+function cloudSyncState(){ return { pushPending:pushPending, interacting:_dragging }; } // diagnostic surface (used by tests)
+let _dragGuardWired=false;
+function wireDragGuard(){                                                              // register ONCE; idempotent even if startup ran twice
+  if(_dragGuardWired) return; _dragGuardWired=true;
+  document.addEventListener('pointerdown', e=>{ if(e.target && e.target.closest && e.target.closest(_DRAG_SEL)) _dragging=true; }, true);
+  const endDrag=()=>{ _dragging=false; };
+  document.addEventListener('pointerup', endDrag, true);
+  document.addEventListener('pointercancel', endDrag, true);
+}
 function schedulePush(){ pushPending=true; clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, 800); }
 async function cloudPush(){
   if(!cloudOn()) return;
   try{
     const res = await fetch(apiUrl("/api/state"), { method:"PUT", headers:apiHeaders(), body:JSON.stringify({doc:DB}) });
-    if(res.ok){ const j=await res.json(); if(j && typeof j.rev==="number") setLsRev(j.rev); pushPending=false; }
-  }catch(e){ /* offline → localStorage holds the change; retried on next save */ }
+    if(res.ok){ const j=await res.json(); if(j && typeof j.rev==="number") setLsRev(j.rev); pushPending=false; pushFails=0; return; }
+    onPushFail();                                    // FIX: server rejected → clear latch + backoff retry (never leave pushPending stuck)
+  }catch(e){ onPushFail(); }                          // FIX: offline/blocked → clear latch + backoff retry
+}
+function onPushFail(){                                // FIX: clearing pushPending stops a failed push from permanently blocking cloudPull adoption
+  pushPending=false;
+  const delay=Math.min(5000*(1<<Math.min(pushFails++,4)), 60000);
+  clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, delay);
 }
 function editingNow(){
+  if(_dragging) return true;                  // never adopt a remote doc while a drag/resize is in flight
   const a=document.activeElement;
   if(a && (a.tagName==="TEXTAREA" || a.tagName==="INPUT" || a.isContentEditable)) return true;
   if(el("modalRoot") && el("modalRoot").style.display==="block") return true;
@@ -316,6 +344,7 @@ function route(){
 
 /* =====================  DASHBOARD  ===================== */
 function renderDashboard(){
+  DB.projects.forEach(normalizeModules);
   const ps = DB.projects;
   const cards = ps.map(p=>{
     const pc = PALETTE[p.color%PALETTE.length];
@@ -509,7 +538,7 @@ function wireBoard(){
   el("splitter").addEventListener('pointerdown', onSplitDown);
   const L=el("leftScroll"), R=el("rightScroll"); let syncing=false;
   L.onscroll=()=>{ hideTip(); if(syncing)return; syncing=true; R.scrollTop=L.scrollTop; syncing=false; };
-  R.onscroll=()=>{ hideTip(); if(syncing)return; syncing=true; L.scrollTop=R.scrollTop; syncing=false; };
+  R.onscroll=()=>{ hideTip(); scheduleStickyLabels(); if(syncing)return; syncing=true; L.scrollTop=R.scrollTop; syncing=false; }; // rAF-throttled sliding labels + vertical pane sync
   const bd=el("board");
   if(bd){ bd.addEventListener('mouseover', onBoardOver); bd.addEventListener('mousemove', onBoardMove); bd.addEventListener('mouseleave', hideTip); }
 }
@@ -541,7 +570,7 @@ function onSplitDown(e){
   const ls=el("leftScroll");
   split={ startX:e.clientX, startW:ls.getBoundingClientRect().width };
   el("splitter").classList.add('drag'); document.body.style.userSelect='none'; document.body.style.cursor='col-resize';
-  window.addEventListener('pointermove', onSplitMove); window.addEventListener('pointerup', onSplitUp, {once:true});
+  window.addEventListener('pointermove', onSplitMove); window.addEventListener('pointerup', onSplitUp);
 }
 function onSplitMove(e){
   if(!split) return;
@@ -551,7 +580,8 @@ function onSplitMove(e){
   el("leftScroll").style.width=w+"px";
 }
 function onSplitUp(){
-  if(!split) return; window.removeEventListener('pointermove', onSplitMove);
+  window.removeEventListener('pointermove', onSplitMove); window.removeEventListener('pointerup', onSplitUp);
+  if(!split) return;                                 // idempotent: a second invocation is a safe no-op
   document.body.style.userSelect=''; document.body.style.cursor=''; el("splitter").classList.remove('drag');
   const P=proj(); if(P){ P.leftW=Math.round(el("leftScroll").getBoundingClientRect().width); Store.save(); }
   split=null;
@@ -566,7 +596,7 @@ function renderSummary(){
         <span class="eyebrow">Project Status</span>
         <span class="lab">สรุปสถานะโครงการ</span>
         <span class="grow"></span>
-        <span class="sumDateWrap">วันที่อัปเดต <input type="date" id="sumDate" value="${cur.date||iso(today())}"/></span>
+        <span class="sumDateWrap">วันที่อัปเดต <input type="date" id="sumDate" value="${esc(cur.date||iso(today()))}"/></span>
         <button class="btn sm" id="goTimeline" title="ไปหน้าไทม์ไลน์และ Gantt">ไทม์ไลน์โครงการ ${IC.arrow}</button>
       </div>
       <textarea id="sumText" maxlength="1000" placeholder="พิมพ์สรุปสถานะล่าสุด (สูงสุด 1,000 ตัวอักษร)…">${esc(cur.text||"")}</textarea>
@@ -582,6 +612,7 @@ function renderSummary(){
   const ta=el("sumText"), ctr=el("sumCount");
   const upd=()=>{ ctr.textContent=ta.value.length+" / 1000"; ctr.classList.toggle('warn', ta.value.length>=950); };
   upd(); ta.oninput=upd;
+  ta.onblur = ()=>{ if(cur.text!==ta.value){ cur.text=ta.value; Store.save(); } }; // FIX: persist unsaved summary text on blur (no toast) so navigation never drops it
   el("sumSave").onclick = ()=>{ cur.text=ta.value; cur.date=el("sumDate").value||cur.date; P.updatedAt=iso(today()); Store.save(); toast("บันทึกสรุปแล้ว"); };
   el("sumDate").onchange = ()=>{ cur.date=el("sumDate").value; Store.save(); };
   el("sumNew").onclick = ()=>{
@@ -590,7 +621,7 @@ function renderSummary(){
     P.summary.current={id:nid(), date:iso(today()), text:""};
     Store.save(); renderSummary(); toast("เก็บเข้าประวัติแล้ว เริ่มอัปเดตใหม่");
   };
-  el("sumHist").onclick = ()=>{ location.hash="project="+PID+"&view=history"; };
+  el("sumHist").onclick = ()=>{ if(cur.text!==ta.value){ cur.text=ta.value; Store.save(); } location.hash="project="+PID+"&view=history"; }; // FIX: save current summary text before hash-nav to the history overlay
   const gt=el("goTimeline"); if(gt) gt.onclick=()=> switchTab("timeline");
   renderProgress();
 }
@@ -625,10 +656,10 @@ function renderProgress(){
       <span class="kc kc-x"></span>
     </div>`;
     const rows=mods.map(m=>{
-      const s=moduleStats(m), k=kpiOf(m), st=kpiState(m,s);
+      const s=moduleStats(m), k=kpiOf(m), st=kpiState(m,s), isSub=m.parentId!=null;
       const tip=`เสร็จ ${s.donePct}% · กำลังทำ ${s.startedPct}% · ยังไม่เริ่ม ${s.notPct}% (${s.total} งาน)`;
       return `<div class="kpiRow progRow" data-mid="${m.id}">
-        <span class="kc kc-name"><span class="pgrip" data-act="progdrag" title="ลากเพื่อจัดลำดับการแสดงผล">${IC.grip}</span><span class="pmName" title="${esc(m.name)}">${esc(m.name)}</span></span>
+        <span class="kc kc-name"><span class="pgrip" data-act="progdrag" title="ลากเพื่อจัดลำดับการแสดงผล">${IC.grip}</span><span class="pmName" title="${esc(m.name)}">${isSub?'↳ ':''}${esc(m.name)}</span></span>
         <span class="kc kc-bar"><span class="pbar" title="${tip}">${barSeg(s)}</span><span class="kc-auto mono" title="${tip}">${s.donePct}%</span></span>
         <span class="kc kc-num"><input type="number" class="kpiNum" min="0" max="100" step="5" data-f="target" data-mid="${m.id}" value="${k.target==null?'':k.target}" placeholder="—"/></span>
         <span class="kc kc-num"><input type="number" class="kpiNum" min="0" max="100" step="5" data-f="actual" data-mid="${m.id}" value="${k.actual==null?'':k.actual}" placeholder="${s.donePct}"/></span>
@@ -662,7 +693,7 @@ function onProgDragStart(e){
   progDrag={ mid:row.dataset.mid, target:null, ghost:null };
   const g=document.createElement('div'); g.className='progGhost'; g.textContent=row.querySelector('.pmName').textContent;
   document.body.appendChild(g); progDrag.ghost=g; document.body.style.userSelect='none'; mvProgGhost(e);
-  window.addEventListener('pointermove', onProgDragMove); window.addEventListener('pointerup', onProgDragUp, {once:true});
+  window.addEventListener('pointermove', onProgDragMove); window.addEventListener('pointerup', onProgDragUp);
 }
 function onProgDragMove(e){
   if(!progDrag) return; mvProgGhost(e);
@@ -672,7 +703,8 @@ function onProgDragMove(e){
   if(row && row.dataset.mid!==progDrag.mid){ const rc=row.getBoundingClientRect(); const before=e.clientY<rc.top+rc.height/2; progDrag.target={mid:row.dataset.mid,before}; row.classList.add(before?'pBefore':'pAfter'); }
 }
 function onProgDragUp(){
-  if(!progDrag) return; window.removeEventListener('pointermove', onProgDragMove); document.body.style.userSelect='';
+  window.removeEventListener('pointermove', onProgDragMove); window.removeEventListener('pointerup', onProgDragUp);
+  if(!progDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
   if(progDrag.ghost) progDrag.ghost.remove(); clearProgMark();
   const d=progDrag; progDrag=null; if(!d.target) return;
   const P=proj(); const order=normalizeProgressOrder(P).slice();
@@ -687,7 +719,7 @@ function showHistory(){
   const entries=[{...P.summary.current,_cur:true}].concat(P.summary.history.map(h=>({...h})));
   const items=entries.map(e=>`
     <div class="histItem ${e._cur?'cur':''}" data-id="${e.id}" data-cur="${e._cur?1:0}">
-      <div class="top">${e._cur?'<span class="badge">ปัจจุบัน</span>':''}<input type="date" value="${e.date||''}" data-f="date"/><span class="grow"></span>${e._cur?'':`<button class="iconbtn danger" data-act="delhist" title="ลบ">${IC.trash}</button>`}</div>
+      <div class="top">${e._cur?'<span class="badge">ปัจจุบัน</span>':''}<input type="date" value="${esc(e.date||'')}" data-f="date"/><span class="grow"></span>${e._cur?'':`<button class="iconbtn danger" data-act="delhist" title="ลบ">${IC.trash}</button>`}</div>
       <textarea maxlength="1000" data-f="text">${esc(e.text||"")}</textarea>
       <div class="row2"><span class="ctr"></span><span class="grow"></span><button class="btn sm" data-act="savehist">บันทึก</button></div>
     </div>`).join("");
@@ -736,8 +768,9 @@ function allCols(){
     let c;
     if(k.startsWith("c:")){ const cc=P.customCols.find(x=>("c:"+x.id)===k); c={key:k,label:cc.label,w:cc.w,kind:cc.kind,custom:cc.id,del:true}; }
     else c={...BASE_COLDEFS[k]};
-    // local-only width override (ui.colW) — never written back to the doc/customCols
-    if(ui.colW && ui.colW[k]!=null){ const ov=+ui.colW[k]; if(!isNaN(ov)) c.w=Math.max(60,Math.min(640,ov)); }
+    // local-only width override (ui.colW), namespaced per project — never written back to the doc/customCols
+    const _pw=ui.colW && ui.colW[PID];               // FIX: read this project's widths only, so resizes don't bleed across projects
+    if(_pw && _pw[k]!=null){ const ov=+_pw[k]; if(!isNaN(ov)) c.w=Math.max(60,Math.min(640,ov)); }
     return c;
   });
 }
@@ -754,8 +787,36 @@ function updateMeta(){
   const ml=el("metaLine"); if(ml) ml.textContent=`${esc(P.client||"")} · ${nMod} โมดูล · ${nFeat} ฟีเจอร์ · ${monName(r.start.getMonth())} ${dispYear(r.start)} – ${monName(r.end.getMonth())} ${dispYear(r.end)}`;
 }
 
+/* =====================  MODULE HIERARCHY (parentId model)  =====================
+   Additive, backward-compatible: module.parentId (string|null|undefined). Falsy ⇒
+   MAIN module; set ⇒ SUB-module of that main. Exactly one level deep (a sub can
+   never be a parent). normalizeModules() runs at the top of renderBoard()/render-
+   Dashboard() and after every module mutation, so `mi` array indices stay valid for
+   BOTH panes (they render from this same normalized array). */
+function normalizeModules(P){
+  if(!P || !Array.isArray(P.modules)) return P;
+  const mods=P.modules, ids=new Set(mods.map(m=>m.id));
+  const hadParent=new Set(mods.filter(m=>m.parentId!=null).map(m=>m.id)); // input snapshot: who is a sub
+  // (1) sanitize: parentId pointing to a missing id, to itself, or to a module that is itself a sub → promote to main
+  mods.forEach(m=>{ const pid=m.parentId; if(pid==null) return; if(!ids.has(pid)||pid===m.id||hadParent.has(pid)) m.parentId=null; });
+  // (2) stable block reorder: every main immediately followed by its own subs (mains keep order; subs keep order within a parent)
+  const out=[], used=new Set();
+  mods.forEach(m=>{ if(m.parentId!=null||used.has(m.id)) return; out.push(m); used.add(m.id);
+    mods.forEach(s=>{ if(s.parentId===m.id && !used.has(s.id)){ out.push(s); used.add(s.id); } }); });
+  mods.forEach(m=>{ if(!used.has(m.id)){ m.parentId=null; out.push(m); used.add(m.id); } }); // safety: strays become mains
+  P.modules=out; return P;
+}
+/* index of the MAIN a module (main or sub) belongs to */
+function mainIndexOf(mods, idx){ const m=mods[idx]; if(!m||m.parentId==null) return idx; const pi=mods.findIndex(x=>x.id===m.parentId); return pi>=0?pi:idx; }
+/* [start,end) of the contiguous block = a MAIN plus its immediate subs (assumes normalized order) */
+function blockRange(mods, mainIdx){ const id=mods[mainIdx].id; let end=mainIdx+1; while(end<mods.length && mods[end].parentId===id) end++; return [mainIdx,end]; }
+/* order+parent signature — detects drop-in-place (no-op) module moves */
+function moduleOrderSig(mods){ return mods.map(m=>m.id+"~"+(m.parentId==null?"":m.parentId)).join("|"); }
+
 /* =====================  RENDER BOARD  ===================== */
-function renderBoard(){ renderGrid(); renderTimeline(); updateMeta(); if(el("progressPanel")) renderProgress(); }
+function renderBoard(){
+  const P=proj(); if(P) normalizeModules(P); renderGrid(); renderTimeline(); updateMeta(); if(el("progressPanel")) renderProgress();
+}
 
 function renderGrid(){
   const P=proj(), cols=allCols();
@@ -768,19 +829,25 @@ function renderGrid(){
   let html="";
   P.modules.forEach((m,mi)=>{
     const p=PALETTE[m.color%PALETTE.length];
-    html += `<div class="modRow ${m.collapsed?'collapsed':''}" style="width:${gw}px" data-mi="${mi}">
+    const isSub=m.parentId!=null, nxt=P.modules[mi+1];
+    const lastSub=isSub && (!nxt || nxt.parentId!==m.parentId);   // last sub of its parent → its block holds the rail terminus (subEnd)
+    const modCls="modRow"+(m.collapsed?" collapsed":"")+(isSub?" subMod":"")+((lastSub&&m.collapsed)?" subEnd":""); // collapsed last sub → modRow itself is the terminus
+    html += `<div class="${modCls}" style="width:${gw}px" data-mi="${mi}">
+      <span class="modGrip" data-act="moddrag" title="ลากเพื่อย้ายโมดูล">${IC.grip}</span>
       <span class="caret" data-act="toggle">${IC.caret}</span>
       <span class="chip" style="background:${p.chip}"></span>
       <span class="modText"><span class="modName" contenteditable="true" data-field="modname" spellcheck="false">${esc(m.name)}</span>${m.description?`<span class="modDesc" data-tip="${esc(m.description)}">${esc(m.description)}</span>`:""}</span>
       <span class="count">${m.features.length}</span>
       <span class="modActs">
+        <button class="iconbtn" data-act="modup" title="เลื่อนโมดูลขึ้น">${IC.up}</button>
+        <button class="iconbtn" data-act="moddown" title="เลื่อนโมดูลลง">${IC.down}</button>
         <button class="iconbtn" data-act="editmod" title="แก้ไขโมดูล">${IC.edit}</button>
         <button class="iconbtn" data-act="addfeat" title="เพิ่มฟีเจอร์">${IC.plus}</button>
         <button class="iconbtn danger" data-act="delmod" title="ลบโมดูล">${IC.trash}</button>
       </span></div>`;
     if(!m.collapsed){
       m.features.forEach((f,fi)=>{
-        html += `<div class="featRow" data-mi="${mi}" data-fi="${fi}">`;
+        html += `<div class="featRow${isSub?' subScope':''}" data-mi="${mi}" data-fi="${fi}">`;
         cols.forEach(c=>{
           if(c.kind==="feat"){
             html += `<div class="cell feat" style="width:${c.w}px">
@@ -789,7 +856,7 @@ function renderGrid(){
               <span class="rowActs"><button class="iconbtn" data-act="up" title="เลื่อนขึ้น">${IC.up}</button><button class="iconbtn" data-act="down" title="เลื่อนลง">${IC.down}</button><button class="iconbtn danger" data-act="delfeat" title="ลบฟีเจอร์">${IC.trash}</button></span></div>`;
           } else if(c.kind==="date"){
             const dval=c.custom?(f.custom[c.custom]||""):(f[c.key]||"");
-            html += `<div class="cell" style="width:${c.w}px"><input type="date" value="${dval}" data-mi="${mi}" data-fi="${fi}" data-field="${c.key}" /></div>`;
+            html += `<div class="cell" style="width:${c.w}px"><input type="date" value="${esc(dval)}" data-mi="${mi}" data-fi="${fi}" data-field="${c.key}" /></div>`;
           } else if(c.kind==="status"){
             const st=stById(f.status);
             const opts=STATUS.map(s=>`<option value="${s.id}" ${s.id===f.status?'selected':''}>${s.th}</option>`).join("");
@@ -801,7 +868,7 @@ function renderGrid(){
         });
         html += `</div>`;
       });
-      html += `<div class="addFeat" data-mi="${mi}" data-act="addfeat">${IC.plus}<span>เพิ่มฟีเจอร์ในโมดูลนี้</span></div>`;
+      html += `<div class="addFeat${isSub?' subScope':''}${lastSub?' subEnd':''}" data-mi="${mi}" data-act="addfeat">${IC.plus}<span>เพิ่มฟีเจอร์ในโมดูลนี้</span></div>`;
     }
   });
   el("leftBody").innerHTML = html;
@@ -856,6 +923,7 @@ function renderTimeline(){
   el("empty").style.display=P.modules.length?"none":"flex";
   bindBars();
   applyWrap();
+  updateStickyLabels();                                 // apply the sliding-label shift for the current scroll (fresh bars start at transform:'')
 }
 
 /* ---- Wrap Txt: sync chart row heights with (possibly wrapped) left rows ---- */
@@ -903,12 +971,49 @@ function isClipped(inner, container){
   const ir=inner.getBoundingClientRect(), cr=container.getBoundingClientRect();
   return ir.left < cr.left - 0.5 || ir.right > cr.right + 0.5;
 }
-/* A bar label needs the floatTip when its text is truncated inside the bar OR
-   scrolled out of the chart viewport (#rightScroll) so it is not fully visible. */
+/* A bar label needs the floatTip when its text can't be fully read in place. Two cases:
+   (a) it is truncated inside its own box (ellipsis — small bar too narrow for the name);
+   (b) after a sticky shift (updateStickyLabels) the label box is clipped by the bar's
+       right edge OR by the chart viewport edge (scrolled so far the name can't stay in
+       view). The check is on the POST-shift rendered rects: the visible slice is the
+       intersection of the bar's box (overflow:hidden) and #rightScroll's viewport. */
 function labelNeedsTip(lbl){
   if(!lbl) return false;
-  if((lbl.scrollWidth - lbl.clientWidth) > 1) return true;   // truncated (ellipsis)
-  return isClipped(lbl, el('rightScroll'));                  // horizontally out of view
+  if((lbl.scrollWidth - lbl.clientWidth) > 1) return true;   // truncated inside its own box (ellipsis)
+  const bar=lbl.closest('.bar'), R=el('rightScroll');
+  if(!bar || !R) return isClipped(lbl, el('rightScroll'));   // fallback: viewport-only clip
+  const lr=lbl.getBoundingClientRect(), br=bar.getBoundingClientRect(), rr=R.getBoundingClientRect();
+  const clipLeft=Math.max(br.left, rr.left), clipRight=Math.min(br.right, rr.right);
+  return lr.left < clipLeft - 0.5 || lr.right > clipRight + 0.5;
+}
+/* ---- Sliding (sticky-within-bar) Gantt labels ----------------------------------------
+   While a bar's START scrolls off the LEFT edge of #rightScroll but the bar is still
+   partly visible, translate its .blabel RIGHT so the task name stays pinned just inside
+   the visible left edge (you can still read which task the bar is). Clamp once the label
+   would leave the bar's RIGHT edge — past that it clips and labelNeedsTip()'s hover bubble
+   takes over. Small bars (label wider than the bar) clamp to shift 0 and keep today's
+   ellipsis + hover-bubble behavior. Cheap: one pass over the bars, safe on every rAF frame.
+   .blabel has pointer-events:none, so the transform never affects drag hit-testing, and no
+   bar geometry / left|width is touched. */
+function updateStickyLabels(){
+  const R=el('rightScroll'); if(!R) return;
+  const layer=el('rowsLayer'); if(!layer) return;
+  const vpLeft=R.scrollLeft, vpRight=vpLeft+R.clientWidth, PAD=9;   // PAD matches .bar's left padding
+  layer.querySelectorAll('.bar').forEach(bar=>{
+    const lbl=bar.querySelector('.blabel'); if(!lbl) return;
+    const barLeft=parseFloat(bar.style.left)||0;
+    const barW=parseFloat(bar.style.width)||bar.offsetWidth;
+    if(barLeft+barW < vpLeft || barLeft > vpRight){ if(lbl.style.transform) lbl.style.transform=''; return; } // fully off-viewport
+    const labelW=lbl.scrollWidth;
+    let shift=vpLeft-barLeft;                                       // move the label start to the viewport-left edge
+    shift=Math.max(0, Math.min(shift, barW-labelW-2*PAD));         // never before bar start; never past bar's right edge
+    lbl.style.transform = shift>0 ? ('translateX('+shift+'px)') : '';
+  });
+}
+let _stickyRAF=0;
+function scheduleStickyLabels(){                                    // coalesce a scroll burst into one update per frame
+  if(_stickyRAF) return;
+  _stickyRAF=requestAnimationFrame(()=>{ _stickyRAF=0; updateStickyLabels(); });
 }
 function onBoardOver(e){
   const t=e.target;
@@ -955,6 +1060,7 @@ function bindGrid(){
   lb.querySelectorAll('select.statusSel').forEach(x=> x.addEventListener('change', onStatusChange));
   lb.querySelectorAll('[data-act]').forEach(b=> b.addEventListener('click', onGridAction));
   lb.querySelectorAll('.grip[data-act="rowdrag"]').forEach(g=> g.addEventListener('pointerdown', onRowDragStart));
+  lb.querySelectorAll('.modGrip[data-act="moddrag"]').forEach(g=> g.addEventListener('pointerdown', onModDragStart));
   const lh=el("leftHead");
   lh.querySelectorAll('[data-act="delcol"]').forEach(b=> b.addEventListener('click', onGridAction));
   lh.querySelectorAll('.colHead').forEach(h=> h.addEventListener('pointerdown', onColDragStart));
@@ -990,11 +1096,20 @@ function onGridAction(e){
   if(act==="delcol"){ const cid=b.dataset.col; if(confirm("ลบคอลัมน์นี้และข้อมูลในคอลัมน์?")){ P.customCols=P.customCols.filter(c=>c.id!==cid); P.modules.forEach(m=>m.features.forEach(f=>{ delete f.custom[cid]; })); Store.save(); renderBoard(); } return; }
   if(act==="addfeat"){ const mEl=b.closest('.modRow'); const mi=(b.dataset.mi!=null)?+b.dataset.mi:(mEl?+mEl.dataset.mi:-1); if(mi>=0) featureModal(mi); return; }
   const modEl=b.closest('.modRow');
-  if(modEl && (act==="toggle"||act==="delmod"||act==="editmod")){
+  if(modEl && (act==="toggle"||act==="delmod"||act==="editmod"||act==="modup"||act==="moddown")){
     const mi=+modEl.dataset.mi;
     if(act==="toggle"){ P.modules[mi].collapsed=!P.modules[mi].collapsed; Store.save(); renderBoard(); return; }
     if(act==="editmod"){ moduleModal(mi); return; }
-    if(act==="delmod"){ if(confirm(`ลบโมดูล “${P.modules[mi].name}” และฟีเจอร์ทั้งหมด?`)){ P.modules.splice(mi,1); Store.save(); renderBoard(); } return; }
+    if(act==="modup"){ moveModuleUpDown(mi,-1); return; }
+    if(act==="moddown"){ moveModuleUpDown(mi,1); return; }
+    if(act==="delmod"){
+      const target=P.modules[mi]; if(!target) return;
+      const subs=P.modules.filter(x=>x.parentId===target.id);                  // only a MAIN can have subs (one level deep)
+      const msg=subs.length ? `ลบโมดูล “${target.name}” และฟีเจอร์ทั้งหมด? โมดูลย่อยจะถูกเลื่อนขั้นเป็นโมดูลหลัก`
+                            : `ลบโมดูล “${target.name}” และฟีเจอร์ทั้งหมด?`;
+      if(confirm(msg)){ subs.forEach(s=>{ s.parentId=null; }); P.modules=P.modules.filter(x=>x!==target); normalizeModules(P); Store.save(); renderBoard(); }
+      return;
+    }
   }
   const featEl=b.closest('.featRow'); if(!featEl) return;
   const mi=+featEl.dataset.mi, fi=+featEl.dataset.fi, feats=P.modules[mi].features;
@@ -1025,8 +1140,8 @@ function featureModal(mi, fi){
     <div class="field"><label>ชื่อฟีเจอร์ · Feature name</label><input type="text" id="fm_name" value="${esc(f.name||"")}" placeholder="ตั้งชื่อฟีเจอร์…"/></div>
     <div class="field"><label>คำอธิบาย · Description</label><textarea id="fm_desc" placeholder="อธิบายสั้น ๆ (ไม่บังคับ)">${esc(f.description||"")}</textarea></div>
     <div class="field2">
-      <div class="field"><label>วันเริ่ม · Start</label><input type="date" id="fm_start" value="${f.start||iso(t)}"/></div>
-      <div class="field"><label>วันสิ้นสุด · End</label><input type="date" id="fm_end" value="${f.end||iso(addDays(t,7))}"/></div>
+      <div class="field"><label>วันเริ่ม · Start</label><input type="date" id="fm_start" value="${esc(f.start||iso(t))}"/></div>
+      <div class="field"><label>วันสิ้นสุด · End</label><input type="date" id="fm_end" value="${esc(f.end||iso(addDays(t,7)))}"/></div>
     </div>
     <div class="field"><label>หมายเหตุ · Remark</label><input type="text" id="fm_remark" value="${esc(f.remark||"")}" placeholder="หมายเหตุ (ไม่บังคับ)"/></div>
     <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="fm_save">${editing?"บันทึก":"เพิ่มฟีเจอร์"}</button></div>`);
@@ -1046,6 +1161,16 @@ function moduleModal(mi){
   const P=proj(), editing=(mi!=null)?P.modules[mi]:null;
   let color=editing?editing.color:(P.modules.length%PALETTE.length);
   const sw=PALETTE.map((p,i)=>`<div class="swatch ${i===color?'on':''}" data-c="${i}" style="background:${p.chip}"></div>`).join("");
+  /* Feature 2.2.1 — Module / Sub-Module type + parent picker */
+  const mains=P.modules.filter(m=>m.parentId==null && m!==editing);        // candidate parents (exclude the module being edited)
+  const hasSubs=!!editing && P.modules.some(m=>m.parentId===editing.id);    // a main that already has subs can't become a sub itself
+  const canSub=mains.length>0 && !hasSubs;
+  let kind=(editing && editing.parentId!=null && mains.some(m=>m.id===editing.parentId)) ? "sub" : "main";
+  if(!canSub) kind="main";
+  let parentId=(editing && editing.parentId!=null && mains.some(m=>m.id===editing.parentId)) ? editing.parentId : (mains[0]?mains[0].id:"");
+  const parentOpts=mains.map(m=>`<option value="${esc(m.id)}" ${m.id===parentId?'selected':''}>${esc(m.name)}</option>`).join("");
+  const kindHint=hasSubs ? "มีโมดูลย่อยอยู่ — ย้ายหรือเลื่อนขั้นโมดูลย่อยก่อน"
+              : (mains.length===0 ? "ยังไม่มีโมดูลหลักอื่นให้สังกัด — สร้างโมดูลหลักก่อน" : "");
   /* create-mode only: optional picker to MOVE existing features (from other modules) into the new module */
   let pickerHtml="";
   if(!editing){
@@ -1067,10 +1192,20 @@ function moduleModal(mi){
     <div class="msub">โมดูลคือกลุ่มของฟีเจอร์ในแผนงาน</div>
     <div class="field"><label>ชื่อโมดูล · Module name</label><input type="text" id="mm_name" value="${editing?esc(editing.name):""}" placeholder="เช่น Procurement P2P (Section B)"/></div>
     <div class="field"><label>คำอธิบายสั้น · Short description</label><textarea id="mm_desc" placeholder="อธิบายสั้น ๆ เช่น 43 features — PR, PO, GR, Reports">${editing?esc(editing.description||""):""}</textarea></div>
+    <div class="field"><label>ประเภท · Type</label>
+      <div class="seg" id="mm_kind">
+        <button type="button" data-k="main" class="${kind==='main'?'on':''}">โมดูลหลัก · Module</button>
+        <button type="button" data-k="sub" class="${kind==='sub'?'on':''}" ${canSub?'':'disabled'}>โมดูลย่อย · Sub-Module</button>
+      </div>
+      ${kindHint?`<div class="mmKindHint">${esc(kindHint)}</div>`:""}
+    </div>
+    <div class="field" id="mm_parentField" style="${kind==='sub'?'':'display:none'}"><label>สังกัดโมดูลหลัก · Parent module</label><select id="mm_parent" ${canSub?'':'disabled'}>${parentOpts}</select></div>
     <div class="field"><label>สี · Colour</label><div class="swatches" id="mm_sw">${sw}</div></div>
     ${pickerHtml}
     <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="mm_save">${editing?"บันทึก":"สร้างโมดูล"}</button></div>`);
   el("modalRoot").querySelectorAll('#mm_sw .swatch').forEach(s=> s.onclick=()=>{ color=+s.dataset.c; el("modalRoot").querySelectorAll('#mm_sw .swatch').forEach(x=>x.classList.toggle('on',x===s)); });
+  const kindSeg=el("mm_kind"), parentField=el("mm_parentField");
+  kindSeg.querySelectorAll('button').forEach(b=> b.onclick=()=>{ if(b.disabled) return; kind=b.dataset.k; kindSeg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b)); if(parentField) parentField.style.display=(kind==='sub')?'':'none'; });
   const pick=el("mm_pick");
   if(pick){
     const updateCount=()=>{
@@ -1087,8 +1222,10 @@ function moduleModal(mi){
   }
   el("mm_save").onclick=()=>{
     const name=el("mm_name").value.trim()||"โมดูลใหม่", desc=el("mm_desc").value.trim();
-    if(editing){ editing.name=name; editing.description=desc; editing.color=color; Store.save(); closeModal(); renderBoard(); toast("บันทึกโมดูลแล้ว"); return; }
-    const newMod={id:nid(),name,description:desc,color,collapsed:false,features:[]};
+    const pSel=el("mm_parent");
+    const newParent=(kind==='sub' && pSel && pSel.value) ? pSel.value : null;   // null ⇒ MAIN; set ⇒ SUB of that main
+    if(editing){ editing.name=name; editing.description=desc; editing.color=color; editing.parentId=newParent; normalizeModules(P); Store.save(); closeModal(); renderBoard(); toast("บันทึกโมดูลแล้ว"); return; }
+    const newMod={id:nid(),name,description:desc,color,collapsed:false,features:[],parentId:newParent};
     P.modules.push(newMod);
     let moved=0;
     if(pick){
@@ -1101,7 +1238,7 @@ function moduleModal(mi){
         }
       });
     }
-    Store.save(); closeModal(); renderBoard();
+    normalizeModules(P); Store.save(); closeModal(); renderBoard();
     toast(moved>0 ? `สร้างโมดูลแล้ว · ย้าย ${moved} ฟีเจอร์เข้าโมดูล` : "สร้างโมดูลแล้ว");
   };
 }
@@ -1141,7 +1278,7 @@ function onBarDown(e){
   const mi=+bar.dataset.mi, fi=+bar.dataset.fi, f=P.modules[mi].features[fi], r=getRange(), ppd=pxPerDay();
   drag={bar,mode,mi,fi,f,ppd,rStart:r.start,startX:e.clientX,oS:daysBetween(r.start,f.start),oE:daysBetween(r.start,f.end)};
   bar.classList.add('dragging'); bar.setPointerCapture(e.pointerId); document.body.style.userSelect='none';
-  window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp, {once:true}); e.preventDefault();
+  window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp); e.preventDefault();
 }
 function onBarMove(e){
   if(!drag) return; const delta=Math.round((e.clientX-drag.startX)/drag.ppd); let s=drag.oS, en=drag.oE;
@@ -1152,7 +1289,7 @@ function onBarMove(e){
   const ei=el("leftBody").querySelector(`input[data-mi="${drag.mi}"][data-fi="${drag.fi}"][data-field="end"]`);
   if(si) si.value=ns; if(ei) ei.value=ne; drag._s=ns; drag._e=ne;
 }
-function onBarUp(){ if(!drag) return; window.removeEventListener('pointermove', onBarMove); document.body.style.userSelect=''; if(drag._s){ drag.f.start=drag._s; drag.f.end=drag._e; Store.save(); } drag.bar.classList.remove('dragging'); drag=null; renderTimeline(); }
+function onBarUp(){ window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); if(!drag) return; document.body.style.userSelect=''; if(drag._s){ drag.f.start=drag._s; drag.f.end=drag._e; Store.save(); } drag.bar.classList.remove('dragging'); drag=null; renderTimeline(); } // idempotent: a second invocation is a safe no-op
 
 /* =====================  ROW DRAG-REORDER  ===================== */
 let rowDrag=null;
@@ -1164,7 +1301,7 @@ function onRowDragStart(e){
   const g=featEl.cloneNode(true); g.classList.add('rowGhost'); g.style.pointerEvents='none'; g.style.width=featEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
   document.body.appendChild(g); rowDrag.ghost=g; document.body.style.userSelect='none';
   rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
-  window.addEventListener('pointermove', onRowDragMove); window.addEventListener('pointerup', onRowDragUp, {once:true});
+  window.addEventListener('pointermove', onRowDragMove); window.addEventListener('pointerup', onRowDragUp);
 }
 /* Hit-test the point (x,y) and mark the drop target: over a featRow → insert
    before/after it; over a module header or a collapsed module → insert at top;
@@ -1190,6 +1327,7 @@ function onRowDragMove(e){
    (and keep the right pane in vertical sync) so distant modules stay reachable. */
 function rowDragAutoScroll(){
   if(!rowDrag) return;
+  if(!_dragging){ rowDrag.target=null; onRowDragUp(); return; }  // drag cancelled (e.g. pointercancel): abort + tear down, stop autoscroll
   const ls=el('leftScroll');
   if(ls){
     const r=ls.getBoundingClientRect(), EDGE=52, MAX=20, y=rowDrag.lastY; let dv=0;
@@ -1204,7 +1342,8 @@ function rowDragAutoScroll(){
   rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
 }
 function onRowDragUp(){
-  if(!rowDrag) return; window.removeEventListener('pointermove', onRowDragMove); document.body.style.userSelect='';
+  window.removeEventListener('pointermove', onRowDragMove); window.removeEventListener('pointerup', onRowDragUp);
+  if(!rowDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
   if(rowDrag.raf) cancelAnimationFrame(rowDrag.raf);
   if(rowDrag.ghost) rowDrag.ghost.remove(); clearDrop();
   const d=rowDrag; rowDrag=null; if(!d.target) return;
@@ -1219,6 +1358,139 @@ function moveFeature(smi,sfi,tmi,tfi,before){
   Store.save(); renderBoard();
 }
 
+/* =====================  MODULE DRAG-REORDER + MOVE BUTTONS (Feature 2.1)  =====================
+   Clone of the feature-row pointer DnD, but the unit is a MODULE: a MAIN moves as a
+   whole block (main + its subs); a SUB inserts next to another sub (adopting its
+   parentId) or drops onto a MAIN modRow to become that main's first sub. Reuses
+   elementFromPoint hit-testing + edge auto-scroll (with the right pane mirrored). */
+let modDrag=null;
+function clearModDrop(){ document.querySelectorAll('.modRow.modDropBefore,.modRow.modDropAfter').forEach(x=>x.classList.remove('modDropBefore','modDropAfter')); }
+/* resolve the module index (+ which row kind) under a point — modRow, featRow, or addFeat all map to a module */
+function modAtPoint(x,y){
+  const under=document.elementFromPoint(x,y); if(!under||!under.closest) return null;
+  const mod=under.closest('.modRow'); if(mod) return {mi:+mod.dataset.mi, el:mod, kind:'mod'};
+  const feat=under.closest('.featRow'); if(feat) return {mi:+feat.dataset.mi, el:feat, kind:'feat'};
+  const add=under.closest('.addFeat'); if(add) return {mi:+add.dataset.mi, el:add, kind:'add'};
+  return null;
+}
+function onModDragStart(e){
+  e.preventDefault();
+  const modEl=e.target.closest('.modRow'); if(!modEl) return;
+  const P=proj(), mi=+modEl.dataset.mi; if(!P||!P.modules[mi]) return;
+  modDrag={ mi, target:null, lastX:e.clientX, lastY:e.clientY, raf:0, ghost:null };
+  const g=modEl.cloneNode(true); g.classList.add('modGhost'); g.style.pointerEvents='none'; g.style.width=modEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
+  document.body.appendChild(g); modDrag.ghost=g; document.body.style.userSelect='none';
+  modDrag.raf=requestAnimationFrame(modDragAutoScroll);
+  window.addEventListener('pointermove', onModDragMove); window.addEventListener('pointerup', onModDragUp);
+}
+function onModDragMove(e){
+  if(!modDrag) return;
+  modDrag.lastX=e.clientX; modDrag.lastY=e.clientY;
+  modDrag.ghost.style.left=(e.clientX-18)+"px"; modDrag.ghost.style.top=(e.clientY-14)+"px";
+  modDragEval(e.clientX, e.clientY);
+}
+/* Hit-test the point and mark the drop target (main-block vs sub semantics). */
+function modDragEval(x,y){
+  if(!modDrag) return;
+  clearModDrop(); modDrag.target=null;
+  const P=proj(), mods=P.modules, dragged=mods[modDrag.mi]; if(!dragged) return;
+  const hit=modAtPoint(x,y); if(!hit) return;
+  const hoverMod=mods[hit.mi]; if(!hoverMod) return;
+  const rc=hit.el.getBoundingClientRect(), before=y<rc.top+rc.height/2;
+  if(dragged.parentId==null){
+    // MAIN → target another whole block; hovering any row of it resolves to that block
+    const tgtMain=mainIndexOf(mods,hit.mi);
+    if(tgtMain===mainIndexOf(mods,modDrag.mi)) return;                       // own block → no target
+    modDrag.target={type:'main', mainIdx:tgtMain, before};
+    const row=el("leftBody").querySelector(`.modRow[data-mi="${tgtMain}"]`);
+    if(row) row.classList.add(before?'modDropBefore':'modDropAfter');
+  } else if(hoverMod.parentId!=null){
+    // SUB over another SUB → insert before/after it (adopts that sub's parentId)
+    if(hoverMod.id===dragged.id) return;
+    modDrag.target={type:'subToSub', tmi:hit.mi, before};
+    const row=el("leftBody").querySelector(`.modRow[data-mi="${hit.mi}"]`);
+    if(row) row.classList.add(before?'modDropBefore':'modDropAfter');
+  } else if(hit.kind==='mod'){
+    // SUB over a MAIN modRow → re-parent as that main's first sub
+    modDrag.target={type:'subToMain', tmi:hit.mi};
+    hit.el.classList.add('modDropBefore');
+  }
+  // SUB over a MAIN's feat/add rows ⇒ no target ⇒ no-op
+}
+/* Edge auto-scroll the left pane while dragging; keep the right pane's scrollTop mirrored. */
+function modDragAutoScroll(){
+  if(!modDrag) return;
+  if(!_dragging){ modDrag.target=null; onModDragUp(); return; }  // drag cancelled (e.g. pointercancel): abort + tear down, stop autoscroll
+  const ls=el('leftScroll');
+  if(ls){
+    const r=ls.getBoundingClientRect(), EDGE=52, MAX=20, y=modDrag.lastY; let dv=0;
+    if(y<r.top+EDGE) dv=-Math.ceil(MAX*Math.min(1,(r.top+EDGE-y)/EDGE));
+    else if(y>r.bottom-EDGE) dv=Math.ceil(MAX*Math.min(1,(y-(r.bottom-EDGE))/EDGE));
+    if(dv){
+      const prev=ls.scrollTop, max=ls.scrollHeight-ls.clientHeight;
+      ls.scrollTop=Math.max(0, Math.min(max, prev+dv));
+      if(ls.scrollTop!==prev){ const rs=el('rightScroll'); if(rs) rs.scrollTop=ls.scrollTop; modDragEval(modDrag.lastX, modDrag.lastY); }
+    }
+  }
+  modDrag.raf=requestAnimationFrame(modDragAutoScroll);
+}
+function onModDragUp(){
+  window.removeEventListener('pointermove', onModDragMove); window.removeEventListener('pointerup', onModDragUp);
+  if(!modDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
+  if(modDrag.raf) cancelAnimationFrame(modDrag.raf);
+  if(modDrag.ghost) modDrag.ghost.remove(); clearModDrop();
+  const d=modDrag; modDrag=null; if(!d.target) return;
+  const P=proj(), mods=P.modules, dragged=mods[d.mi]; if(!dragged) return;
+  const before=moduleOrderSig(mods);                                         // capture BEFORE any parentId mutation
+  let next=null;
+  if(d.target.type==='main'){
+    next=computeMainBlockMove(mods, d.mi, d.target.mainIdx, d.target.before);
+  } else if(d.target.type==='subToSub'){
+    const tgt=mods[d.target.tmi]; if(!tgt) return;
+    dragged.parentId=tgt.parentId;
+    const rest=mods.filter(m=>m!==dragged);
+    let ti=rest.findIndex(m=>m.id===tgt.id); if(ti<0) return; if(!d.target.before) ti+=1;
+    next=rest.slice(0,ti).concat([dragged], rest.slice(ti));
+  } else if(d.target.type==='subToMain'){
+    const main=mods[d.target.tmi]; if(!main) return;
+    dragged.parentId=main.id;
+    const rest=mods.filter(m=>m!==dragged);
+    let ti=rest.findIndex(m=>m.id===main.id); if(ti<0) return; ti+=1;         // right after the main = first sub
+    next=rest.slice(0,ti).concat([dragged], rest.slice(ti));
+  }
+  commitModuleMove(P, before, next);
+}
+/* Reordered array that moves a MAIN block before/after a target block. */
+function computeMainBlockMove(mods, srcMainIdx, tgtMainIdx, before){
+  const [s0,s1]=blockRange(mods,srcMainIdx), block=mods.slice(s0,s1);
+  const rest=mods.slice(0,s0).concat(mods.slice(s1));
+  const ri=rest.findIndex(m=>m.id===mods[tgtMainIdx].id); if(ri<0) return null;
+  const [rt0,rt1]=blockRange(rest, ri), at=before?rt0:rt1;
+  return rest.slice(0,at).concat(block, rest.slice(at));
+}
+/* modup/moddown: a MAIN swaps with the adjacent MAIN block; a SUB swaps with the adjacent sibling sub. */
+function moveModuleUpDown(mi, dir){
+  const P=proj(), mods=P.modules, m=mods[mi]; if(!m) return;
+  const before=moduleOrderSig(mods); let next=null;
+  if(m.parentId==null){
+    const [s0,s1]=blockRange(mods,mi);
+    if(dir<0){ if(s0<=0) return; const [p0,p1]=blockRange(mods, mainIndexOf(mods,s0-1)); next=mods.slice(0,p0).concat(mods.slice(s0,s1), mods.slice(p0,p1), mods.slice(s1)); }
+    else { if(s1>=mods.length) return; const [n0,n1]=blockRange(mods,s1); next=mods.slice(0,s0).concat(mods.slice(n0,n1), mods.slice(s0,s1), mods.slice(n1)); }
+  } else {
+    const sibs=[]; mods.forEach((x,i)=>{ if(x.parentId===m.parentId) sibs.push(i); });
+    const pos=sibs.indexOf(mi), sw=dir<0?sibs[pos-1]:sibs[pos+1]; if(sw==null) return;
+    next=mods.slice(); [next[mi],next[sw]]=[next[sw],next[mi]];
+  }
+  commitModuleMove(P, before, next);
+}
+/* Commit a reordered module array only if it actually changed (drop-in-place ⇒ no-op). */
+function commitModuleMove(P, beforeSig, next){
+  if(!next) return false;
+  const test={modules:next.slice()}; normalizeModules(test);
+  if(moduleOrderSig(test.modules)===beforeSig) return false;                  // no change → no save, no render
+  P.modules=test.modules; Store.save(); renderBoard(); return true;
+}
+
 /* =====================  COLUMN DRAG-REORDER  ===================== */
 let colDrag=null;
 function clearColMark(){ document.querySelectorAll('.colHead.insL,.colHead.insR').forEach(x=>x.classList.remove('insL','insR')); }
@@ -1227,7 +1499,7 @@ function onColDragStart(e){
   const head=e.currentTarget; if(!head.dataset.key) return;
   colDrag={ key:head.dataset.key, head, target:null, ghost:null, startX:e.clientX, moved:false };
   document.body.style.userSelect='none';
-  window.addEventListener('pointermove', onColDragMove); window.addEventListener('pointerup', onColDragUp, {once:true});
+  window.addEventListener('pointermove', onColDragMove); window.addEventListener('pointerup', onColDragUp);
 }
 function onColDragMove(e){
   if(!colDrag) return;
@@ -1244,7 +1516,8 @@ function onColDragMove(e){
   }
 }
 function onColDragUp(){
-  if(!colDrag) return; window.removeEventListener('pointermove', onColDragMove); document.body.style.userSelect='';
+  window.removeEventListener('pointermove', onColDragMove); window.removeEventListener('pointerup', onColDragUp);
+  if(!colDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
   if(colDrag.ghost) colDrag.ghost.remove(); clearColMark();
   const d=colDrag; colDrag=null; if(!d.moved||!d.target) return;
   moveColumn(d.key, d.target.key, d.target.before);
@@ -1266,7 +1539,7 @@ function onColResizeStart(e){
   colResize={ key:head.dataset.key, head, idx, handle:e.target, startX:e.clientX, startW:head.getBoundingClientRect().width, w:0 };
   e.target.classList.add('dragging');
   document.body.style.userSelect='none'; document.body.style.cursor='col-resize'; hideTip();
-  window.addEventListener('pointermove', onColResizeMove); window.addEventListener('pointerup', onColResizeUp, {once:true});
+  window.addEventListener('pointermove', onColResizeMove); window.addEventListener('pointerup', onColResizeUp);
 }
 function onColResizeMove(e){
   if(!colResize) return;
@@ -1280,11 +1553,12 @@ function onColResizeMove(e){
   if(ui.wrapTxt) syncRowHeights();                   // content-driven row height follows the new width live
 }
 function onColResizeUp(){
-  if(!colResize) return; window.removeEventListener('pointermove', onColResizeMove);
+  window.removeEventListener('pointermove', onColResizeMove); window.removeEventListener('pointerup', onColResizeUp);
+  if(!colResize) return;                             // idempotent: a second invocation is a safe no-op
   document.body.style.userSelect=''; document.body.style.cursor='';
   if(colResize.handle) colResize.handle.classList.remove('dragging');
   const w=colResize.w || Math.round(colResize.head.getBoundingClientRect().width);
-  if(w){ ui.colW=ui.colW||{}; ui.colW[colResize.key]=w; saveUi(); }
+  if(w){ ui.colW=ui.colW||{}; (ui.colW[PID]=ui.colW[PID]||{})[colResize.key]=w; saveUi(); } // FIX: write width under the current project id (per-project namespace)
   colResize=null;
   renderGrid(); renderTimeline(); applyWrap();        // settle: re-render both panes and re-sync heights
 }
@@ -1301,9 +1575,13 @@ function exportXlsx(){
   const P=proj(), customLabels=P.customCols.map(c=>c.label);
   const header=["Module","Feature ID","Feature","Description","Start","End","Status","Remark",...customLabels];
   const aoa=[header];
-  P.modules.forEach(m=> m.features.forEach(f=>{
-    aoa.push([m.name,f.fid||"",f.name,f.description||"",f.start,f.end,stById(f.status).en,f.remark||"",...P.customCols.map(c=>f.custom[c.id]||"")]);
-  }));
+  P.modules.forEach(m=>{
+    const parent=m.parentId!=null ? P.modules.find(x=>x.id===m.parentId) : null;
+    const modLabel=parent ? (parent.name+" › "+m.name) : m.name;              // sub-module features show "Parent › Sub"
+    m.features.forEach(f=>{
+      aoa.push([modLabel,f.fid||"",f.name,f.description||"",f.start,f.end,stById(f.status).en,f.remark||"",...P.customCols.map(c=>f.custom[c.id]||"")]);
+    });
+  });
   const ws=XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols']=[{wch:26},{wch:11},{wch:30},{wch:40},{wch:12},{wch:12},{wch:13},{wch:18},...customLabels.map(()=>({wch:18}))];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Timeline");
@@ -1370,6 +1648,7 @@ async function exportPng(){
   if(typeof html2canvas==="undefined"){ toast("ไลบรารี PNG โหลดไม่สำเร็จ (ต้องต่ออินเทอร์เน็ต)"); return; }
   const board=el("board"), L=el("leftScroll"), R=el("rightScroll");
   const pl=L.scrollTop, pr=R.scrollLeft; L.scrollTop=R.scrollTop=0; R.scrollLeft=0;
+  updateStickyLabels();                                 // scroll is reset to 0 → clears sliding-label shifts so the snapshot shows labels at bar starts
   board.classList.add('exporting');
   const w=board.scrollWidth, h=Math.max(el("leftBody").scrollHeight, el("bars").scrollHeight)+el("leftHead").offsetHeight+4;
   toast("กำลังสร้างภาพ PNG…");
@@ -1377,7 +1656,7 @@ async function exportPng(){
     const c=await html2canvas(board,{backgroundColor:"#ffffff",scale:2,width:w,height:h,windowWidth:w+40,windowHeight:h+40,scrollX:0,scrollY:0,logging:false});
     const a=document.createElement('a'); a.download=safeName(proj().code||proj().name)+"_Timeline.png"; a.href=c.toDataURL("image/png"); a.click(); toast("ส่งออก PNG แล้ว");
   }catch(err){ console.error(err); toast("สร้าง PNG ไม่สำเร็จ"); }
-  finally{ board.classList.remove('exporting'); L.scrollTop=R.scrollTop=pl; R.scrollLeft=pr; }
+  finally{ board.classList.remove('exporting'); L.scrollTop=R.scrollTop=pl; R.scrollLeft=pr; updateStickyLabels(); } // restore scroll → re-apply the slide immediately
 }
 
 /* =====================  MODAL / TOAST  ===================== */
@@ -1485,8 +1764,9 @@ async function backupModal(){
 /* =====================  INIT  ===================== */
 Store.load();
 route();
+wireDragGuard();                                       // one centralized capture-phase pointerdown/up/cancel guard for background-sync deferral
 window.addEventListener('hashchange', route);
-window.addEventListener('storage', e=>{ if(e.key===LS_KEY){ Store.load(); route(); } });
+window.addEventListener('storage', e=>{ if(e.key===LS_KEY && !editingNow()){ Store.load(); route(); } }); // FIX: don't reload/re-render from a cross-tab write while a drag/resize or edit is in flight
 if(cloudOn()){ cloudSync(); window.addEventListener('focus', ()=>cloudPull(false)); setInterval(()=>cloudPull(false), 30000); }
 document.addEventListener('keydown', e=>{
   if(e.key==="Escape"){

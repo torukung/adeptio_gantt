@@ -1,4 +1,53 @@
-# Changelog — Adeptio Project Tracking
+# Changelog
+
+## v1.0.3 — Module hierarchy & drag-and-drop
+
+New module-management features (built on top of the integrity fixes above):
+
+- **Move modules (2.1):** grip handle + up/down buttons on every module row;
+  pointer drag-and-drop reorders modules. Main modules move as a whole block
+  (carrying their sub-modules); the new drag latches `isInteracting` so cloud
+  sync never fires mid-drag.
+- **Module edit/delete on the row (2.2):** edit, add-feature, and delete
+  actions live on the module line.
+- **Sub-modules (2.2.1):** a module can be set as a Sub-Module of a main module
+  via a Module / Sub-Module toggle + parent picker (one level deep). Deleting a
+  parent promotes its sub-modules to main.
+- **Tree lines (2.2.2):** sub-modules render a connector rail + elbow from their
+  parent in the left grid.
+- **Sliding bar labels:** a timeline bar whose start scrolls off the left keeps its
+  label pinned to the visible left edge (sliding as you scroll); when the visible
+  slice is too small for the label, the hover floating bubble takes over. Bars too
+  small to ever fit their label keep the hover bubble.
+- **Step indentation (2.4):** features under modules and sub-modules are indented
+  by hierarchy level. Excel export shows `Parent › Sub`; the progress panel
+  prefixes sub-modules with `↳`.
+
+## v1.0.3 — Integrity fixes (pre-feature hardening)
+
+Security & data-safety fixes applied to the v1.0.2 baseline **before** the new
+module features, each confirmed by adversarial verification and covered by a
+Playwright regression test:
+
+- **XSS (major):** date values interpolated into `value="…"` are now `esc()`-escaped
+  at all five sinks (grid date cell, feature modal start/end, summary date, history
+  date). Blocks stored/DOM XSS from a restored or cloud-synced document.
+- **Summary loss (major):** the Status & Summary textarea now autosaves on blur and
+  before navigating to History, so typed text is never dropped.
+- **Mid-drag latch hardening (major):** the interaction latch now also clears on
+  `pointercancel` / `lostpointercapture` for all seven drag lifecycles, self-heals on
+  the next render, and `.bar`/`.colHead`/`#splitter` get `touch-action:none` — so a
+  cancelled touch/trackpad drag can never freeze cloud sync.
+- **Mid-drag sync (major):** an interaction latch (`isInteracting`) defers cloud
+  pull / cross-tab adoption while any drag or resize is in flight, preventing a
+  background sync from corrupting an in-progress drag.
+- **Push retry (minor):** a failed cloud push no longer latches `pushPending`; it
+  clears and retries with capped backoff.
+- **Silent storage failure (minor):** a `localStorage` write failure now surfaces a
+  toast instead of losing data silently.
+- **Column-width bleed (minor):** column widths are namespaced per project, so a
+  resize in one project no longer changes another.
+ — Adeptio Project Tracking
 
 All notable changes to the blueprint are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); dates in CE.

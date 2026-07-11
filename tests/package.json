@@ -1,0 +1,13 @@
+{
+  "name": "adeptio-gantt-tests",
+  "version": "1.0.3",
+  "private": true,
+  "description": "Playwright suite for Adeptio Gantt v1.0.3 — module DnD reorder, up/down block moves, sub-modules (parentId), tree-line rails, step indentation, left/right pane alignment. Blocks the production Cloudflare Worker before any page script runs.",
+  "scripts": {
+    "test": "playwright test",
+    "install-browser": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.0"
+  }
+}
