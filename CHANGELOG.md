@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.0.3 — Module hierarchy & drag-and-drop
+
+New module-management features (built on top of the integrity fixes above):
+
+- **Move modules (2.1):** grip handle + up/down buttons on every module row;
+  pointer drag-and-drop reorders modules. Main modules move as a whole block
+  (carrying their sub-modules); the new drag latches `isInteracting` so cloud
+  sync never fires mid-drag.
+- **Module edit/delete on the row (2.2):** edit, add-feature, and delete
+  actions live on the module line.
+- **Sub-modules (2.2.1):** a module can be set as a Sub-Module of a main module
+  via a Module / Sub-Module toggle + parent picker (one level deep). Deleting a
+  parent promotes its sub-modules to main.
+- **Tree lines (2.2.2):** sub-modules render a connector rail + elbow from their
+  parent in the left grid.
+- **Step indentation (2.4):** features under modules and sub-modules are indented
+  by hierarchy level. Excel export shows `Parent › Sub`; the progress panel
+  prefixes sub-modules with `↳`.
+
 ## v1.0.3 — Integrity fixes (pre-feature hardening)
 
 Security & data-safety fixes applied to the v1.0.2 baseline **before** the new

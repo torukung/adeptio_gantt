@@ -58,6 +58,8 @@ button{font-family:inherit; cursor:pointer;}
 .seg button:last-child{border-right:0;}
 .seg button:hover{color:#000;}
 .seg button.on{background:#000; color:var(--green-adpt); font-weight:600;}
+.seg button:disabled{color:var(--ink-faint); opacity:.5; cursor:not-allowed;}
+.seg button:disabled:hover{color:var(--ink-faint);}
 .seg .lbl{font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); padding:0 8px; align-self:center;}
 .eyebrow{font-family:var(--font-body); font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--violet-adpt); font-weight:700;}
 .spring{flex:1 1 auto;}
@@ -233,6 +235,13 @@ button{font-family:inherit; cursor:pointer;}
 .count{font-family:var(--mono); font-size:10.5px; color:var(--ink-faint); background:var(--surface); padding:1px 8px; border-radius:20px; flex:0 0 auto;}
 .modActs{display:flex; gap:2px; margin-left:auto; opacity:0; transition:.12s;}
 .modRow:hover .modActs{opacity:1;}
+/* module grip (Feature 2.1/2.2): always visible, dimmed → full on hover; same visual language as feature-row grips */
+.modGrip{width:16px; flex:0 0 auto; display:flex; align-items:center; justify-content:center; color:var(--grey-light-adpt); cursor:grab; touch-action:none; opacity:.5; transition:opacity .12s, color .12s;}
+.modGrip:hover{color:var(--ink-soft); opacity:1;}
+.modRow:hover .modGrip{opacity:1;}
+.modGrip svg{width:13px; height:13px;}
+.modRow.modDropBefore{box-shadow:inset 0 3px 0 var(--violet-adpt); background:#f0e9ff;}
+.modRow.modDropAfter{box-shadow:inset 0 -3px 0 var(--violet-adpt); background:#f0e9ff;}
 
 .featRow{display:flex; align-items:stretch; height:var(--rowH); border-bottom:1px solid var(--line); background:var(--panel);}
 .featRow:hover{background:#faf9ff;}
@@ -258,9 +267,26 @@ button{font-family:inherit; cursor:pointer;}
 .featRow:hover .rowActs{opacity:1;}
 .rowActs .iconbtn{width:22px; height:22px;}
 .rowActs .iconbtn svg{width:12px; height:12px;}
-.addFeat{display:flex; align-items:center; gap:6px; height:32px; padding:0 8px 0 30px; color:var(--violet-adpt); font-size:12.5px; cursor:pointer; border-bottom:1px solid var(--line); background:var(--panel);}
+.addFeat{display:flex; align-items:center; gap:6px; height:32px; padding:0 8px 0 calc(6px + var(--step)); color:var(--violet-adpt); font-size:12.5px; cursor:pointer; border-bottom:1px solid var(--line); background:var(--panel);}
 .addFeat:hover{background:#f5f1ff;}
 .addFeat svg{width:13px; height:13px;}
+
+/* ===== MODULE HIERARCHY — step indent (2.4) + sub-module tree rails (2.2.2) =====
+   Indent is padding on the first cell content / a chip shift (never a row margin) so
+   rows stay full-width for borders + drag hit-testing. Rails are per-row ::before/
+   ::after segments (top:0 / bottom:0) so any row height works, wrapTxt included. */
+:root{ --step:24px; --rail:rgba(146,65,255,.34); --rail-x:50px; }
+/* 2.4 — indent steps: main feat = 1, sub modRow = 1, sub feat = 2 */
+.cell.feat{padding-left:calc(4px + var(--step));}                       /* was 4px — feature of a main = 1 step */
+.featRow.subScope .cell.feat{padding-left:calc(4px + 2*var(--step));}   /* feature of a sub = 2 steps */
+.addFeat.subScope{padding-left:calc(6px + 2*var(--step));}             /* sub add-zone aligns under sub features */
+.subMod .chip{margin-left:var(--step);}                                /* sub modRow content shifted 1 step (chip + name move together) */
+.subMod .modName{font-weight:500;}                                     /* lighter than a main's 700 → hierarchy reads */
+/* 2.2.2 — vertical rail on every sub row + elbow into each sub-module header */
+.subMod, .featRow.subScope, .addFeat.subScope{position:relative;}
+.subMod::before, .featRow.subScope::before, .addFeat.subScope::before{content:""; position:absolute; left:var(--rail-x); top:0; bottom:0; width:2px; background:var(--rail); pointer-events:none;}
+.subMod::after{content:""; position:absolute; left:var(--rail-x); top:calc(50% - 1px); width:calc(var(--step) + 6px); height:2px; background:var(--rail); pointer-events:none;}
+.subEnd::before{bottom:auto; height:calc(50% + 1px);}                  /* terminate the parent rail at its last sub block's elbow */
 
 /* timeline */
 #axis{position:relative; min-width:max-content;}
@@ -307,6 +333,7 @@ button{font-family:inherit; cursor:pointer;}
 #empty{position:absolute; inset:0; display:none; align-items:center; justify-content:center; flex-direction:column; gap:14px; color:var(--ink-faint); text-align:center;}
 #empty svg{width:46px; height:46px; opacity:.5;}
 .rowGhost{position:fixed; z-index:90; pointer-events:none; opacity:.92; box-shadow:var(--shadow-hover); border:1px solid var(--violet-adpt); border-radius:10px; background:#fff; overflow:hidden;}
+.modGhost{position:fixed; z-index:90; pointer-events:none; opacity:.94; box-shadow:var(--shadow-hover); border:1px solid var(--violet-adpt); border-radius:10px; background:linear-gradient(180deg,#fbfaff,#f4f2fb); overflow:hidden; height:var(--modH);}
 
 /* ===== MODAL + HISTORY ===== */
 #modalRoot{display:none;}
@@ -370,7 +397,7 @@ button{font-family:inherit; cursor:pointer;}
 /* print: hide chrome */
 @media print{
   body,#app,#proj{height:auto; overflow:visible;}
-  #topbar,#summaryPanel,.rowActs,.modActs,.grip,.handle,.addFeat,#splitter{display:none !important;}
+  #topbar,#summaryPanel,.rowActs,.modActs,.grip,.modGrip,.handle,.addFeat,#splitter{display:none !important;}
   #board{overflow:visible; display:block;}
   #leftScroll,#rightScroll{overflow:visible;}
 }
@@ -401,6 +428,8 @@ button{font-family:inherit; cursor:pointer;}
 .field2 .field{flex:1 1 0; min-width:0;}
 .field select{width:100%; height:38px; border:1px solid var(--line-strong); border-radius:var(--r-sm); padding:0 10px; font-family:inherit; font-size:13px; color:var(--ink); background:#fff; color-scheme:light;}
 .field input[type=date]{color-scheme:light;}
+/* moduleModal (2.2.1) — type-guard hint under the Module / Sub-Module segmented control */
+.mmKindHint{font-size:11px; color:var(--ink-faint); margin-top:6px; line-height:1.5;}
 
 /* ===== KPI progress table (Status & Summary) ===== */
 .kpiTableWrap{margin-top:6px; overflow-x:auto;}
