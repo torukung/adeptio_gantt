@@ -192,13 +192,13 @@ button{font-family:inherit; cursor:pointer;}
 
 #board{flex:1 1 auto; display:flex; position:relative; overflow:hidden;}
 #leftScroll{flex:0 0 auto; width:var(--leftW); overflow:auto; background:var(--panel); border-right:0; position:relative; z-index:2;}
-#splitter{flex:0 0 7px; cursor:col-resize; background:var(--line-strong); position:relative; z-index:4; transition:background .12s;}
+#splitter{flex:0 0 7px; cursor:col-resize; background:var(--line-strong); position:relative; z-index:4; transition:background .12s; touch-action:none;}
 #splitter:hover,#splitter.drag{background:var(--violet-adpt);}
 #splitter::after{content:""; position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:2px; height:26px; border-radius:2px; background:rgba(255,255,255,.8);}
 #rightScroll{flex:1 1 auto; overflow:auto; position:relative; background:var(--panel);}
 .headRow{position:sticky; top:0; z-index:6; height:var(--headH); background:var(--panel); border-bottom:2px solid var(--line-strong);}
 #leftHead{display:flex; min-width:max-content;}
-.colHead{flex:0 0 auto; height:var(--headH); display:flex; align-items:center; padding:0 10px; color:var(--ink-soft); border-right:1px solid var(--line); text-transform:uppercase; font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; position:relative; cursor:grab;}
+.colHead{flex:0 0 auto; height:var(--headH); display:flex; align-items:center; padding:0 10px; color:var(--ink-soft); border-right:1px solid var(--line); text-transform:uppercase; font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; position:relative; cursor:grab; touch-action:none;}
 .colHead:active{cursor:grabbing;}
 .colHead .colLabel{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1 1 auto; min-width:0;}
 .colHead.hasTool,.colHead.hasDel{padding-right:32px;}
@@ -307,7 +307,7 @@ button{font-family:inherit; cursor:pointer;}
 .barRow{position:relative; height:var(--rowH); border-bottom:1px solid var(--line);}
 .barRow.alt{background:rgba(20,22,30,.012);}
 .modBarRow{position:relative; height:var(--modH); border-bottom:1px solid var(--line-strong); background:linear-gradient(180deg,rgba(251,250,255,.6),rgba(244,242,251,.6));}
-.bar{position:absolute; top:7px; height:calc(var(--rowH) - 16px); border-radius:8px; display:flex; align-items:center; padding:0 9px; cursor:grab; user-select:none; box-shadow:var(--shadow-bar); border:1px solid rgba(0,0,0,.08); overflow:hidden; transition:box-shadow .12s;}
+.bar{position:absolute; top:7px; height:calc(var(--rowH) - 16px); border-radius:8px; display:flex; align-items:center; padding:0 9px; cursor:grab; user-select:none; touch-action:none; box-shadow:var(--shadow-bar); border:1px solid rgba(0,0,0,.08); overflow:hidden; transition:box-shadow .12s;}
 .bar:hover{box-shadow:0 2px 8px rgba(20,24,40,.22); z-index:4;}
 .bar.dragging{cursor:grabbing; box-shadow:0 6px 18px rgba(20,24,40,.3); z-index:8; transition:none;}
 .sdot{width:7px; height:7px; border-radius:50%; flex:0 0 auto; margin-right:5px; box-shadow:0 0 0 1.5px rgba(255,255,255,.65);}

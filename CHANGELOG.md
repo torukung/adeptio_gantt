@@ -30,6 +30,10 @@ Playwright regression test:
   date). Blocks stored/DOM XSS from a restored or cloud-synced document.
 - **Summary loss (major):** the Status & Summary textarea now autosaves on blur and
   before navigating to History, so typed text is never dropped.
+- **Mid-drag latch hardening (major):** the interaction latch now also clears on
+  `pointercancel` / `lostpointercapture` for all seven drag lifecycles, self-heals on
+  the next render, and `.bar`/`.colHead`/`#splitter` get `touch-action:none` — so a
+  cancelled touch/trackpad drag can never freeze cloud sync.
 - **Mid-drag sync (major):** an interaction latch (`isInteracting`) defers cloud
   pull / cross-tab adoption while any drag or resize is in flight, preventing a
   background sync from corrupting an in-progress drag.

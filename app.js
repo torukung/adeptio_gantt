@@ -559,7 +559,7 @@ function onSplitDown(e){
   const ls=el("leftScroll");
   split={ startX:e.clientX, startW:ls.getBoundingClientRect().width };
   el("splitter").classList.add('drag'); document.body.style.userSelect='none'; document.body.style.cursor='col-resize';
-  beginInteract(); window.addEventListener('pointermove', onSplitMove); window.addEventListener('pointerup', onSplitUp, {once:true});
+  beginInteract(); window.addEventListener('pointermove', onSplitMove); window.addEventListener('pointerup', onSplitUp); window.addEventListener('pointercancel', onSplitUp); // FIX: end on pointercancel too, so the latch/ghost never leak
 }
 function onSplitMove(e){
   if(!split) return;
@@ -569,8 +569,9 @@ function onSplitMove(e){
   el("leftScroll").style.width=w+"px";
 }
 function onSplitUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends
-  if(!split) return; window.removeEventListener('pointermove', onSplitMove);
+  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
+  window.removeEventListener('pointermove', onSplitMove); window.removeEventListener('pointerup', onSplitUp); window.removeEventListener('pointercancel', onSplitUp); // remove ALL siblings so nothing leaks whichever fired
+  if(!split) return;                                 // idempotent: a second invocation is a safe no-op
   document.body.style.userSelect=''; document.body.style.cursor=''; el("splitter").classList.remove('drag');
   const P=proj(); if(P){ P.leftW=Math.round(el("leftScroll").getBoundingClientRect().width); Store.save(); }
   split=null;
@@ -682,7 +683,7 @@ function onProgDragStart(e){
   progDrag={ mid:row.dataset.mid, target:null, ghost:null };
   const g=document.createElement('div'); g.className='progGhost'; g.textContent=row.querySelector('.pmName').textContent;
   document.body.appendChild(g); progDrag.ghost=g; document.body.style.userSelect='none'; mvProgGhost(e);
-  beginInteract(); window.addEventListener('pointermove', onProgDragMove); window.addEventListener('pointerup', onProgDragUp, {once:true});
+  beginInteract(); window.addEventListener('pointermove', onProgDragMove); window.addEventListener('pointerup', onProgDragUp); window.addEventListener('pointercancel', onProgDragUp); // FIX: end on pointercancel too, so the latch/ghost never leak
 }
 function onProgDragMove(e){
   if(!progDrag) return; mvProgGhost(e);
@@ -692,8 +693,9 @@ function onProgDragMove(e){
   if(row && row.dataset.mid!==progDrag.mid){ const rc=row.getBoundingClientRect(); const before=e.clientY<rc.top+rc.height/2; progDrag.target={mid:row.dataset.mid,before}; row.classList.add(before?'pBefore':'pAfter'); }
 }
 function onProgDragUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends
-  if(!progDrag) return; window.removeEventListener('pointermove', onProgDragMove); document.body.style.userSelect='';
+  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
+  window.removeEventListener('pointermove', onProgDragMove); window.removeEventListener('pointerup', onProgDragUp); window.removeEventListener('pointercancel', onProgDragUp); // remove ALL siblings so nothing leaks whichever fired
+  if(!progDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
   if(progDrag.ghost) progDrag.ghost.remove(); clearProgMark();
   const d=progDrag; progDrag=null; if(!d.target) return;
   const P=proj(); const order=normalizeProgressOrder(P).slice();
@@ -803,7 +805,13 @@ function blockRange(mods, mainIdx){ const id=mods[mainIdx].id; let end=mainIdx+1
 function moduleOrderSig(mods){ return mods.map(m=>m.id+"~"+(m.parentId==null?"":m.parentId)).join("|"); }
 
 /* =====================  RENDER BOARD  ===================== */
-function renderBoard(){ const P=proj(); if(P) normalizeModules(P); renderGrid(); renderTimeline(); updateMeta(); if(el("progressPanel")) renderProgress(); }
+function renderBoard(){
+  // FIX: self-heal the interaction latch. If a drag ended via pointercancel/lostpointercapture
+  // without its *Up handler running, _interacting can stick true and permanently freeze cloud/
+  // storage sync. Clear it whenever a full render happens with no drag object actually in flight.
+  if(_interacting && !drag && !rowDrag && !colDrag && !colResize && !modDrag && !progDrag && !split) endInteract();
+  const P=proj(); if(P) normalizeModules(P); renderGrid(); renderTimeline(); updateMeta(); if(el("progressPanel")) renderProgress();
+}
 
 function renderGrid(){
   const P=proj(), cols=allCols();
@@ -1227,7 +1235,7 @@ function onBarDown(e){
   const mi=+bar.dataset.mi, fi=+bar.dataset.fi, f=P.modules[mi].features[fi], r=getRange(), ppd=pxPerDay();
   drag={bar,mode,mi,fi,f,ppd,rStart:r.start,startX:e.clientX,oS:daysBetween(r.start,f.start),oE:daysBetween(r.start,f.end)};
   bar.classList.add('dragging'); bar.setPointerCapture(e.pointerId); document.body.style.userSelect='none';
-  beginInteract(); window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp, {once:true}); e.preventDefault();
+  beginInteract(); window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp); window.addEventListener('pointercancel', onBarUp); e.preventDefault(); // FIX: end on pointercancel too, so the latch/ghost never leak
 }
 function onBarMove(e){
   if(!drag) return; const delta=Math.round((e.clientX-drag.startX)/drag.ppd); let s=drag.oS, en=drag.oE;
@@ -1238,7 +1246,7 @@ function onBarMove(e){
   const ei=el("leftBody").querySelector(`input[data-mi="${drag.mi}"][data-fi="${drag.fi}"][data-field="end"]`);
   if(si) si.value=ns; if(ei) ei.value=ne; drag._s=ns; drag._e=ne;
 }
-function onBarUp(){ endInteract(); if(!drag) return; window.removeEventListener('pointermove', onBarMove); document.body.style.userSelect=''; if(drag._s){ drag.f.start=drag._s; drag.f.end=drag._e; Store.save(); } drag.bar.classList.remove('dragging'); drag=null; renderTimeline(); }
+function onBarUp(){ endInteract(); window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); window.removeEventListener('pointercancel', onBarUp); if(!drag) return; document.body.style.userSelect=''; if(drag._s){ drag.f.start=drag._s; drag.f.end=drag._e; Store.save(); } drag.bar.classList.remove('dragging'); drag=null; renderTimeline(); } // FIX: clear latch + remove ALL siblings on pointerup OR pointercancel; idempotent no-op if drag already cleared
 
 /* =====================  ROW DRAG-REORDER  ===================== */
 let rowDrag=null;
@@ -1250,7 +1258,7 @@ function onRowDragStart(e){
   const g=featEl.cloneNode(true); g.classList.add('rowGhost'); g.style.pointerEvents='none'; g.style.width=featEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
   document.body.appendChild(g); rowDrag.ghost=g; document.body.style.userSelect='none';
   rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
-  beginInteract(); window.addEventListener('pointermove', onRowDragMove); window.addEventListener('pointerup', onRowDragUp, {once:true});
+  beginInteract(); window.addEventListener('pointermove', onRowDragMove); window.addEventListener('pointerup', onRowDragUp); window.addEventListener('pointercancel', onRowDragUp); // FIX: end on pointercancel too, so the latch/ghost/rAF never leak
 }
 /* Hit-test the point (x,y) and mark the drop target: over a featRow → insert
    before/after it; over a module header or a collapsed module → insert at top;
@@ -1290,8 +1298,9 @@ function rowDragAutoScroll(){
   rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
 }
 function onRowDragUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends
-  if(!rowDrag) return; window.removeEventListener('pointermove', onRowDragMove); document.body.style.userSelect='';
+  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
+  window.removeEventListener('pointermove', onRowDragMove); window.removeEventListener('pointerup', onRowDragUp); window.removeEventListener('pointercancel', onRowDragUp); // remove ALL siblings so nothing leaks whichever fired
+  if(!rowDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
   if(rowDrag.raf) cancelAnimationFrame(rowDrag.raf);
   if(rowDrag.ghost) rowDrag.ghost.remove(); clearDrop();
   const d=rowDrag; rowDrag=null; if(!d.target) return;
@@ -1329,7 +1338,7 @@ function onModDragStart(e){
   const g=modEl.cloneNode(true); g.classList.add('modGhost'); g.style.pointerEvents='none'; g.style.width=modEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
   document.body.appendChild(g); modDrag.ghost=g; document.body.style.userSelect='none';
   modDrag.raf=requestAnimationFrame(modDragAutoScroll);
-  beginInteract(); window.addEventListener('pointermove', onModDragMove); window.addEventListener('pointerup', onModDragUp, {once:true}); // FIX3: module drag latches interaction so cloud/storage sync defers
+  beginInteract(); window.addEventListener('pointermove', onModDragMove); window.addEventListener('pointerup', onModDragUp); window.addEventListener('pointercancel', onModDragUp); // FIX3: module drag latches interaction so cloud/storage sync defers; FIX: end on pointercancel too, so the latch/ghost/rAF never leak
 }
 function onModDragMove(e){
   if(!modDrag) return;
@@ -1382,8 +1391,9 @@ function modDragAutoScroll(){
   modDrag.raf=requestAnimationFrame(modDragAutoScroll);
 }
 function onModDragUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends
-  if(!modDrag) return; window.removeEventListener('pointermove', onModDragMove); document.body.style.userSelect='';
+  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
+  window.removeEventListener('pointermove', onModDragMove); window.removeEventListener('pointerup', onModDragUp); window.removeEventListener('pointercancel', onModDragUp); // remove ALL siblings so nothing leaks whichever fired
+  if(!modDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
   if(modDrag.raf) cancelAnimationFrame(modDrag.raf);
   if(modDrag.ghost) modDrag.ghost.remove(); clearModDrop();
   const d=modDrag; modDrag=null; if(!d.target) return;
@@ -1446,7 +1456,7 @@ function onColDragStart(e){
   const head=e.currentTarget; if(!head.dataset.key) return;
   colDrag={ key:head.dataset.key, head, target:null, ghost:null, startX:e.clientX, moved:false };
   document.body.style.userSelect='none';
-  beginInteract(); window.addEventListener('pointermove', onColDragMove); window.addEventListener('pointerup', onColDragUp, {once:true});
+  beginInteract(); window.addEventListener('pointermove', onColDragMove); window.addEventListener('pointerup', onColDragUp); window.addEventListener('pointercancel', onColDragUp); // FIX: end on pointercancel too, so the latch/ghost never leak
 }
 function onColDragMove(e){
   if(!colDrag) return;
@@ -1463,8 +1473,9 @@ function onColDragMove(e){
   }
 }
 function onColDragUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends
-  if(!colDrag) return; window.removeEventListener('pointermove', onColDragMove); document.body.style.userSelect='';
+  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
+  window.removeEventListener('pointermove', onColDragMove); window.removeEventListener('pointerup', onColDragUp); window.removeEventListener('pointercancel', onColDragUp); // remove ALL siblings so nothing leaks whichever fired
+  if(!colDrag) return; document.body.style.userSelect=''; // idempotent: a second invocation is a safe no-op
   if(colDrag.ghost) colDrag.ghost.remove(); clearColMark();
   const d=colDrag; colDrag=null; if(!d.moved||!d.target) return;
   moveColumn(d.key, d.target.key, d.target.before);
@@ -1486,7 +1497,7 @@ function onColResizeStart(e){
   colResize={ key:head.dataset.key, head, idx, handle:e.target, startX:e.clientX, startW:head.getBoundingClientRect().width, w:0 };
   e.target.classList.add('dragging');
   document.body.style.userSelect='none'; document.body.style.cursor='col-resize'; hideTip();
-  beginInteract(); window.addEventListener('pointermove', onColResizeMove); window.addEventListener('pointerup', onColResizeUp, {once:true});
+  beginInteract(); window.addEventListener('pointermove', onColResizeMove); window.addEventListener('pointerup', onColResizeUp); window.addEventListener('pointercancel', onColResizeUp); // FIX: end on pointercancel too, so the latch never leaks
 }
 function onColResizeMove(e){
   if(!colResize) return;
@@ -1500,8 +1511,9 @@ function onColResizeMove(e){
   if(ui.wrapTxt) syncRowHeights();                   // content-driven row height follows the new width live
 }
 function onColResizeUp(){
-  endInteract();                                     // FIX: clear the interaction latch when the drag ends
-  if(!colResize) return; window.removeEventListener('pointermove', onColResizeMove);
+  endInteract();                                     // FIX: clear the interaction latch when the drag ends (fires on pointerup OR pointercancel)
+  window.removeEventListener('pointermove', onColResizeMove); window.removeEventListener('pointerup', onColResizeUp); window.removeEventListener('pointercancel', onColResizeUp); // remove ALL siblings so nothing leaks whichever fired
+  if(!colResize) return;                             // idempotent: a second invocation is a safe no-op
   document.body.style.userSelect=''; document.body.style.cursor='';
   if(colResize.handle) colResize.handle.classList.remove('dragging');
   const w=colResize.w || Math.round(colResize.head.getBoundingClientRect().width);
