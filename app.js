@@ -84,6 +84,9 @@ const IC = {
   restore: ic('<path d="M3 12a9 9 0 109-9 9 9 0 00-7 3.3M3 4v3.5h3.5"/><path d="M12 8v4l3 2"/>'),
   link:  ic('<path d="M9 15l6-6M10.5 6.5l1-1a4 4 0 015.95 5.3l-1.2 1.2M13.5 17.5l-1 1a4 4 0 01-5.95-5.3l1.2-1.2"/>'),
   wrap:  ic('<path d="M3 6h18"/><path d="M3 12h15a3 3 0 010 6h-4"/><path d="M17 15l-3 3 3 3"/><path d="M3 18h6"/>'),
+  indent:  ic('<path d="M4 6h16M4 12h9M4 18h16"/><path d="M15 8.5l3.5 3.5-3.5 3.5"/>'),   // ⇥ tuck under previous sibling (Indent)
+  outdent: ic('<path d="M4 6h16M11 12h9M4 18h16"/><path d="M8.5 8.5L5 12l3.5 3.5"/>'),   // ⇤ lift to grandparent level (Outdent)
+  promote: ic('<path d="M8 8l4-4 4 4M8 16l4 4 4-4"/>'),                                   // ⇄ convert Feature ⇆ Module (promote/demote)
 };
 
 /* =====================  STORE (local-first, optional cloud sync)  ===== */
@@ -934,6 +937,21 @@ function directFeatures(node){ return node && Array.isArray(node.children) ? nod
 function countAll(node){ let n=0; if(node && node.kind==="container") walkTree(node.children||[], ()=>{ n++; }); return n; } // descendant node count (containers + features), for the cascade-delete confirm
 function removeNode(P, id){ const par=siblingsOf(P,id); const i=par.findIndex(n=>n && n.id===id); if(i>=0){ const [g]=par.splice(i,1); return g; } return null; }
 function revealInto(container){ if(container && container.kind==="container") container.collapsed=false; } // R6: inserting INTO a container auto-expands it
+function prevSibling(P, id){ const sibs=siblingsOf(P,id); const i=sibs.findIndex(n=>n&&n.id===id); return i>0?sibs[i-1]:null; }
+function nodeDepth(P, id){ let d=0, cur=findParent(P,id); while(cur){ d++; cur=findParent(P,cur.id); } return d; }
+
+/* ---- SHARED PREDICATES (R5): ONE source of truth for BOTH the grip-menu disabled-states
+   AND the hard guards inside every mutator. The menu only REFLECTS; the mutators re-check. ---- */
+function canIndent(P, id){ const p=prevSibling(P,id); return !!(p && p.kind==="container"); }          // needs a previous SIBLING that is a container
+function canOutdent(P, id){                                                                            // needs a parent, and NOT a feature at depth 1 (root holds containers only)
+  const par=findParent(P,id); if(!par) return false;                                                   // already at root
+  const node=findNode(P,id);
+  if(node && node.kind==="feature" && !findParent(P,par.id)) return false;                             // depth-1 feature → outdent would land at root (illegal)
+  return true;
+}
+function canDemote(P, id){ const n=findNode(P,id); return !!(n && n.kind==="container" && (!n.children || n.children.length===0) && findParent(P,id)!==null); } // G1: childless container AND non-root (root holds containers only — a root demote would be re-wrapped into a "(กู้คืน)" recovery container)
+function canPromote(P, id){ const n=findNode(P,id); return !!(n && n.kind==="feature"); }              // any feature
+function canAddChild(P, id){ const n=findNode(P,id); return !!(n && n.kind==="container"); }           // containers only
 
 /* ---- SINGLE MUTATION GATE (R2) ----
    mutator(P) → normalizeTree(P) → Store.save() → renderBoard(). Returns the mutator's
@@ -952,6 +970,7 @@ function apply(mutator, opts){
     renderBoard();                                     // structural mutation (create/move/delete/promote/…) → full rebuild
   }
   if(r && r.focus) focusNode(r.focus);                 // focus a freshly-created feature's name cell
+  if(r && r.flash) flashNode(r.flash);                 // R6: reveal-and-flash the moved/created row in BOTH panes
   return r || null;
 }
 function focusNode(id){
@@ -959,6 +978,18 @@ function focusNode(id){
   if(row){ const tx=row.querySelector('.cell.feat .txt'); if(tx){ tx.focus(); if(window.getSelection){ const s=window.getSelection(); const rg=document.createRange(); rg.selectNodeContents(tx); rg.collapse(false); s.removeAllRanges(); s.addRange(rg); } } }
 }
 function cssEsc(s){ return String(s).replace(/["\\]/g,"\\$&"); }
+/* R6 reveal-and-flash: after a structural render, pulse a transient violet highlight on the
+   moved/created row in the LEFT pane AND its chart row (addressed by data-nid); removed on animationend. */
+function flashNode(id){
+  if(id==null) return; const sel='[data-nid="'+cssEsc(id)+'"]';
+  const lb=el("leftBody"), rl=el("rowsLayer");
+  const targets=[
+    lb && lb.querySelector('.modRow'+sel), lb && lb.querySelector('.featRow'+sel),
+    rl && rl.querySelector('.modBarRow'+sel), rl && rl.querySelector('.bar'+sel),
+  ];
+  targets.forEach(elm=>{ if(!elm) return; elm.classList.remove('flashRow'); void elm.offsetWidth; elm.classList.add('flashRow');
+    elm.addEventListener('animationend', ()=>elm.classList.remove('flashRow'), {once:true}); });
+}
 
 /* ---- FLATTEN (R9): ONE visible-row list feeds BOTH panes. Row kinds:
    'container' (46px modRow/modBarRow) · 'feature' (42px featRow/barRow) · 'add' (32px addFeat/spacer).
@@ -989,6 +1020,56 @@ function renderBoard(){
   if(el("progressPanel")) renderProgress();
 }
 
+/* ---- GRIP MENU (spec §1.1, D7): the slide-open pill REPLACES the v1.0.3 hover clusters
+   (.modActs / .rowActs). It opens on GRIP hover / focus-within only (never plain row hover),
+   slides open to the right, and its buttons only REFLECT the shared predicates (R5) — the
+   mutators re-decide. The grip keeps its drag data-act (moddrag/rowdrag) + _DRAG_SEL class. ---- */
+/* G6a/§1.9 stepped shading: --shade = rgba(146,65,255, .03 × depth), set INLINE per row (no lvl1..6
+   class clamp — the spec formula is unbounded). depth 0 ⇒ no tint (falls back to the CSS default). */
+function shadeVar(v){ const a=3*Math.max(0, v|0); return a<=0 ? "" : "--shade:rgba(146,65,255,"+(a>=100?"1":"."+String(a).padStart(2,"0"))+");"; }
+function gmBtn(act, icon, title, o){ o=o||{}; return `<button type="button" class="gm${o.danger?" danger":""}" data-act="${act}" title="${esc(title)}"${o.disabled?" disabled":""}>${icon}</button>`; }
+function gripMenu(P, node, depth){
+  const id=node.id, ind=canIndent(P,id), outd=canOutdent(P,id);
+  if(node.kind==="container"){
+    const editT = depth===0 ? "แก้ไขโมดูล" : "แก้ไขโมดูลย่อย";                                          // depth naming (§1.2)
+    return `<div class="gripMenu">`
+      + `<span class="modGrip" data-act="moddrag" title="ลากเพื่อย้ายโมดูล">${IC.grip}</span>`
+      + `<div class="gripPill" role="toolbar">`
+        + gmBtn("modup",  IC.up,      "เลื่อนโมดูลขึ้น")
+        + gmBtn("moddown",IC.down,    "เลื่อนโมดูลลง")
+        + `<span class="gsep"></span>`
+        + gmBtn("outdent",IC.outdent, "เลื่อนออก (Outdent)", {disabled:!outd})
+        + gmBtn("indent", IC.indent,  "เลื่อนเข้า (Indent)",  {disabled:!ind})
+        + `<span class="gsep"></span>`
+        + gmBtn("addfeat",IC.plus,    "เพิ่มฟีเจอร์")
+        + gmBtn("promote",IC.promote, "เปลี่ยนเป็นฟีเจอร์ (Demote)", {disabled:!canDemote(P,id)})
+        + gmBtn("editmod",IC.edit,    editT)
+        + gmBtn("delmod", IC.trash,   "ลบโมดูล", {danger:true})
+      + `</div></div>`;
+  }
+  return `<div class="gripMenu">`
+    + `<span class="grip" data-act="rowdrag" title="ลากเพื่อย้ายแถว">${IC.grip}</span>`
+    + `<div class="gripPill" role="toolbar">`
+      + gmBtn("up",     IC.up,      "เลื่อนขึ้น")
+      + gmBtn("down",   IC.down,    "เลื่อนลง")
+      + `<span class="gsep"></span>`
+      + gmBtn("outdent",IC.outdent, "เลื่อนออก (Outdent)", {disabled:!outd})
+      + gmBtn("indent", IC.indent,  "เลื่อนเข้า (Indent)",  {disabled:!ind})
+      + `<span class="gsep"></span>`
+      + gmBtn("promote",IC.promote, "เปลี่ยนเป็นโมดูล (Promote)")
+      + gmBtn("editfeat",IC.edit,   "แก้ไขฟีเจอร์")
+      + gmBtn("delfeat",IC.trash,   "ลบฟีเจอร์", {danger:true})
+    + `</div></div>`;
+}
+/* Measure each rendered pill's real width → per-row --railW (the exact distance the row content
+   slides right so the open menu never overlays it). Batched reads then writes to avoid layout thrash. */
+function sizeGripRails(){
+  const lb=el("leftBody"); if(!lb) return;
+  const pills=[...lb.querySelectorAll('.gripPill')];
+  const ws=pills.map(p=>p.offsetWidth);
+  pills.forEach((p,i)=>{ const row=p.closest('.modRow,.featRow'); if(row) row.style.setProperty('--railW', ws[i]+'px'); });
+}
+
 function renderGrid(rows){
   const P=proj(), cols=allCols();
   rows = rows || flatten(P);
@@ -1006,28 +1087,25 @@ function renderGrid(rows){
       const isSub=depth>=1;                                             // any depth ≥1 is a "sub-module" visually
       const subEndCls=(isSub && row.lastChild && n.collapsed)?" subEnd":""; // collapsed last child → its modRow is the rail terminus
       const modCls="modRow"+(n.collapsed?" collapsed":"")+(isSub?" subMod":"")+subEndCls;
-      html += `<div class="${modCls}" style="width:${gw}px;--lvl:${depth}" data-nid="${esc(n.id)}">
-      <span class="modGrip" data-act="moddrag" title="ลากเพื่อย้ายโมดูล">${IC.grip}</span>
-      <span class="caret" data-act="toggle">${IC.caret}</span>
-      <span class="chip" style="background:${p.chip}"></span>
-      <span class="modText"><span class="modName" contenteditable="true" data-field="modname" spellcheck="false">${esc(n.name)}</span>${n.description?`<span class="modDesc" data-tip="${esc(n.description)}">${esc(n.description)}</span>`:""}</span>
-      <span class="count">${containerFeatures(n).length}</span>
-      <span class="modActs">
-        <button class="iconbtn" data-act="modup" title="เลื่อนโมดูลขึ้น">${IC.up}</button>
-        <button class="iconbtn" data-act="moddown" title="เลื่อนโมดูลลง">${IC.down}</button>
-        <button class="iconbtn" data-act="editmod" title="แก้ไขโมดูล">${IC.edit}</button>
-        <button class="iconbtn" data-act="addfeat" title="เพิ่มฟีเจอร์">${IC.plus}</button>
-        <button class="iconbtn danger" data-act="delmod" title="ลบโมดูล">${IC.trash}</button>
-      </span></div>`;
+      html += `<div class="${modCls}" style="width:${gw}px;--lvl:${depth};${shadeVar(depth)}" data-nid="${esc(n.id)}">
+      ${gripMenu(P, n, depth)}
+      <div class="modMain">
+        <span class="caret" data-act="toggle">${IC.caret}</span>
+        <span class="chip" style="background:${p.chip}"></span>
+        <span class="modText"><span class="modName" contenteditable="true" data-field="modname" spellcheck="false">${esc(n.name)}</span>${n.description?`<span class="modDesc" data-tip="${esc(n.description)}">${esc(n.description)}</span>`:""}</span>
+        <span class="count">${containerFeatures(n).length}</span>
+      </div></div>`;
     } else if(row.type==="feature"){
       const f=n, isSub=depth>=2;                                        // feature under a sub-container (depth ≥2) → subScope
-      html += `<div class="featRow${isSub?' subScope':''}" style="--lvl:${depth}" data-nid="${esc(f.id)}">`;
+      // G2: featRow mirrors modRow — the grip menu is a DIRECT child at the row front (hover anchor +
+      // drag handle, never overlaid), and .rowMain (the WHOLE cell strip) slides right by the measured
+      // --railW when the menu opens. The pill occupies the vacated space to the left; nothing overlaps.
+      html += `<div class="featRow${isSub?' subScope':''}" style="--lvl:${depth};${shadeVar(depth)}" data-nid="${esc(f.id)}">`;
+      html += gripMenu(P, f, depth);
+      html += `<div class="rowMain">`;
       cols.forEach(c=>{
         if(c.kind==="feat"){
-          html += `<div class="cell feat" style="width:${c.w}px">
-              <span class="grip" data-act="rowdrag" title="ลากเพื่อย้ายแถว">${IC.grip}</span>
-              <span class="txt" contenteditable="true" data-field="name" spellcheck="false" data-ph="ตั้งชื่อฟีเจอร์…">${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}${esc(f.name)}</span>
-              <span class="rowActs"><button class="iconbtn" data-act="up" title="เลื่อนขึ้น">${IC.up}</button><button class="iconbtn" data-act="down" title="เลื่อนลง">${IC.down}</button><button class="iconbtn danger" data-act="delfeat" title="ลบฟีเจอร์">${IC.trash}</button></span></div>`;
+          html += `<div class="cell feat" style="width:${c.w}px"><span class="txt" contenteditable="true" data-field="name" spellcheck="false" data-ph="ตั้งชื่อฟีเจอร์…">${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}${esc(f.name)}</span></div>`;
         } else if(c.kind==="date"){
           const dval=c.custom?((f.custom&&f.custom[c.custom])||""):(f[c.key]||"");
           html += `<div class="cell" style="width:${c.w}px"><input type="date" value="${esc(dval)}" data-nid="${esc(f.id)}" data-field="${c.key}" /></div>`;
@@ -1040,14 +1118,15 @@ function renderGrid(rows){
           html += `<div class="cell" style="width:${c.w}px"><span class="txt" contenteditable="true" data-field="${c.key}" spellcheck="false" data-ph="${esc(c.ph||"…")}">${esc(val)}</span></div>`;
         }
       });
-      html += `</div>`;
+      html += `</div></div>`;                                          // close .rowMain, then .featRow
     } else { // add-feature zone for this container (one per non-collapsed container, at any depth)
       const isSub=depth>=1, subEndCls=(isSub && row.lastChild)?" subEnd":"";
-      html += `<div class="addFeat${isSub?' subScope':''}${subEndCls}" style="--lvl:${depth+1}" data-nid="${esc(n.id)}" data-act="addfeat">${IC.plus}<span>เพิ่มฟีเจอร์ในโมดูลนี้</span></div>`;
+      html += `<div class="addFeat${isSub?' subScope':''}${subEndCls}" style="--lvl:${depth+1};${shadeVar(depth+1)}" data-nid="${esc(n.id)}" data-act="addfeat">${IC.plus}<span>เพิ่มฟีเจอร์ในโมดูลนี้</span></div>`;
     }
   });
   el("leftBody").innerHTML = html;
   bindGrid();
+  sizeGripRails();                                     // measure each pill → per-row --railW (content-slide distance)
 }
 
 function renderTimeline(rows){
@@ -1282,29 +1361,33 @@ function onStatusChange(e){
   apply(P=>{ const f=findNode(P,id); if(f) f.status=s.value; }, {fields:true}); // FIELD edit: renderTimeline refreshes the bar .sdot + progress roll-up
   const st=stById(s.value); if(st) s.style.boxShadow="inset 4px 0 0 "+st.color;  // F2: grid not rebuilt → patch the select's status colour inline (v1.0.3 style)
 }
+/* All grip-menu (and legacy) actions funnel here. delcol/addfeat keep their own targeting;
+   every other act is node-scoped and resolves the row's data-nid (container OR feature). */
 function onGridAction(e){
   const b=e.currentTarget, act=b.dataset.act, P=proj();
   if(act==="delcol"){ const cid=b.dataset.col; if(confirm("ลบคอลัมน์นี้และข้อมูลในคอลัมน์?")){ apply(P2=>{ P2.customCols=(P2.customCols||[]).filter(c=>c.id!==cid); walkFeatures(P2, f=>{ if(f.custom) delete f.custom[cid]; }); }); } return; }
   if(act==="addfeat"){ const host=b.closest('.modRow')||b.closest('.addFeat'); const cid=(host?host.dataset.nid:null)||b.dataset.nid; if(cid) featureModal(cid); return; } // R3: opens the modal pre-targeted; nothing is inserted until save
-  const modEl=b.closest('.modRow');
-  if(modEl && (act==="toggle"||act==="delmod"||act==="editmod"||act==="modup"||act==="moddown")){
-    const id=modEl.dataset.nid;
-    if(act==="toggle"){ apply(P2=>{ const n=findNode(P2,id); if(n) n.collapsed=!n.collapsed; }); return; }
-    if(act==="editmod"){ moduleModal(id); return; }
-    if(act==="modup"){ moveNodeUpDown(id,-1); return; }
-    if(act==="moddown"){ moveNodeUpDown(id,1); return; }
-    if(act==="delmod"){                                                        // D1: cascade delete (no silent child-promotion)
+  const rowEl=b.closest('.modRow')||b.closest('.featRow'); if(!rowEl) return;   // grips (moddrag/rowdrag) fall through to no-op
+  const id=rowEl.dataset.nid;
+  switch(act){
+    case "toggle":   apply(P2=>{ const n=findNode(P2,id); if(n) n.collapsed=!n.collapsed; }); return;
+    case "editmod":
+    case "editfeat": nodeModal(id); return;                                     // D8: unified edit modal for ANY node
+    case "modup":
+    case "up":       moveNodeUpDown(id,-1); return;
+    case "moddown":
+    case "down":     moveNodeUpDown(id,1); return;
+    case "indent":   indent(id);  return;
+    case "outdent":  outdent(id); return;
+    case "promote":  togglePromoteDemote(id); return;                           // ⇄ feature→container OR childless container→feature
+    case "delmod": {                                                            // D1: cascade delete (no silent child-promotion)
       const node=findNode(P,id); if(!node) return;
       const n=countAll(node), msg = n>0 ? `ลบ "${node.name}" และ ${n} รายการข้างใน?` : `ลบ "${node.name}"?`;
       if(confirm(msg)) apply(P2=>{ removeNode(P2,id); });
       return;
     }
+    case "delfeat": { const f=findNode(P,id); if(!f) return; if(confirm(`ลบ "${f.name}"?`)) apply(P2=>{ removeNode(P2,id); }); return; } // a feature has no descendants → plain confirm (N=0)
   }
-  const featEl=b.closest('.featRow'); if(!featEl) return;
-  const id=featEl.dataset.nid;
-  if(act==="delfeat"){ const f=findNode(P,id); if(!f) return; if(confirm(`ลบ "${f.name}"?`)) apply(P2=>{ removeNode(P2,id); }); } // a feature has no descendants → plain confirm (N=0)
-  else if(act==="up"){ moveNodeUpDown(id,-1); }
-  else if(act==="down"){ moveNodeUpDown(id,1); }
 }
 /* up/down: swap a node with its adjacent SIBLING inside its parent's children (or the root
    list). Unifies feature reorder AND module reorder-among-siblings (§4). Boundary ⇒ no-op. */
@@ -1314,16 +1397,52 @@ function moveNodeUpDown(id, dir){
   apply(P=>{ const sb=siblingsOf(P,id); const a=sb.findIndex(n=>n&&n.id===id), b2=a+dir; if(a<0||b2<0||b2>=sb.length) return; const t=sb[a]; sb[a]=sb[b2]; sb[b2]=t; });
 }
 
-/* feature modal — fill in details when adding (or editing) a feature.
-   R3: creation happens ON SAVE ONLY — the grip/＋ opens this pre-targeted at a container
-   (containerId); nothing is inserted until the user saves. */
-function featureModal(containerId, featId){
-  const P=proj(), M=findNode(P,containerId); if(!M || M.kind!=="container") return;
-  const editing=(featId!=null)?findNode(P,featId):null, t=today();
-  const f = editing || {fid:"",name:"",description:"",start:iso(t),end:iso(addDays(t,7)),status:"not_started",remark:""};
+/* ---- STRUCTURE MOVES (spec §5.2) — all through apply() (full render), each returns {flash:id}.
+   Every mutator RE-CHECKS its shared predicate (R5) and no-ops when illegal (the menu only reflects). ---- */
+function indent(id){                                                          // tuck under the previous sibling container (R6 reveal)
+  if(!canIndent(proj(),id)) return;
+  apply(P=>{ if(!canIndent(P,id)) return; const prev=prevSibling(P,id); if(!prev||prev.kind!=="container") return;
+    const g=removeNode(P,id); if(!g) return; if(!Array.isArray(prev.children)) prev.children=[]; prev.children.push(g); revealInto(prev); return {flash:id}; });
+}
+function outdent(id){                                                         // lift into the grandparent's list, right AFTER the former parent
+  if(!canOutdent(proj(),id)) return;
+  apply(P=>{ if(!canOutdent(P,id)) return; const par=findParent(P,id); if(!par) return; const gp=findParent(P,par.id);
+    const g=removeNode(P,id); if(!g) return; const list=gp?gp.children:P.modules;
+    let idx=list.findIndex(n=>n&&n.id===par.id); if(idx<0) idx=list.length-1; list.splice(idx+1,0,g); return {flash:id}; });
+}
+/* R5/G5: pure node transforms — the SINGLE implementation of the feature⇄container conversion,
+   shared by promote()/demote() AND nodeModal's save. Callers own the legality decision
+   (canPromote/canDemote); these just transform. R7: promote keeps ALL feature fields dormant on
+   the node; demote revives them. A demoted node carries NO container-only keys (children/collapsed/
+   features/color) — a feature has no colour of its own (renders with its parent's palette, D8b). */
+function promoteCore(nd){ if(!nd) return; nd.kind="container"; nd.children=[]; nd.collapsed=false; }
+function demoteCore(nd){
+  if(!nd) return;
+  nd.kind="feature"; delete nd.children; delete nd.collapsed; delete nd.features; delete nd.color;
+  if(!nd.custom||typeof nd.custom!=="object") nd.custom={};
+  if(nd.fid==null) nd.fid=""; if(nd.remark==null) nd.remark=""; if(!nd.status) nd.status="not_started";
+  if(!nd.start||!nd.end){ const t=today(); if(!nd.start) nd.start=iso(t); if(!nd.end) nd.end=iso(addDays(t,7)); }
+  if(parse(nd.end)<parse(nd.start)) nd.end=nd.start;
+}
+function promote(id){                                                         // feature → container (R7: ALL feature fields stay dormant on the node)
+  if(!canPromote(proj(),id)) return;
+  apply(P=>{ if(!canPromote(P,id)) return; promoteCore(findNode(P,id)); return {flash:id}; }); // R5: the mutator re-decides inside apply, not the menu
+}
+function demote(id){                                                          // childless NON-ROOT container → feature (dormant fields revive; mirror dropped)
+  if(!canDemote(proj(),id)) return;
+  apply(P=>{ if(!canDemote(P,id)) return; demoteCore(findNode(P,id)); return {flash:id}; }); // R5+G1: root / has-children demote no-ops here even when forced via evaluate
+}
+function togglePromoteDemote(id){ const n=findNode(proj(),id); if(!n) return; if(n.kind==="feature") promote(id); else demote(id); }
+
+/* feature modal — CREATE-ONLY (D8: the unified nodeModal owns all EDIT paths). The grip ＋ / add-zone
+   opens this pre-targeted at a container; R3: creation happens ON SAVE ONLY (nothing inserted before). */
+function featureModal(containerId){
+  const P=proj(), M=findNode(P,containerId); if(!canAddChild(P,containerId)) return;    // R5: containers only (shared predicate — the single legality source)
+  const t=today();
+  const f = {fid:"",name:"",description:"",start:iso(t),end:iso(addDays(t,7)),status:"not_started",remark:""};
   const opts=STATUS.map(s=>`<option value="${s.id}" ${s.id===f.status?'selected':''}>${esc(s.th)}</option>`).join("");
   openModal(`
-    <h2>${editing?"แก้ไขฟีเจอร์":"เพิ่มฟีเจอร์"}</h2>
+    <h2>เพิ่มฟีเจอร์</h2>
     <div class="msub">โมดูล: ${esc(M.name)}</div>
     <div class="field2">
       <div class="field"><label>รหัส · ID</label><input type="text" id="fm_fid" value="${esc(f.fid||"")}" placeholder="เช่น PRO-PR-01"/></div>
@@ -1336,60 +1455,129 @@ function featureModal(containerId, featId){
       <div class="field"><label>วันสิ้นสุด · End</label><input type="date" id="fm_end" value="${esc(f.end||iso(addDays(t,7)))}"/></div>
     </div>
     <div class="field"><label>หมายเหตุ · Remark</label><input type="text" id="fm_remark" value="${esc(f.remark||"")}" placeholder="หมายเหตุ (ไม่บังคับ)"/></div>
-    <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="fm_save">${editing?"บันทึก":"เพิ่มฟีเจอร์"}</button></div>`);
+    <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="fm_save">เพิ่มฟีเจอร์</button></div>`);
   el("fm_name").focus();
   el("fm_save").onclick=()=>{
     const name=el("fm_name").value.trim()||"ฟีเจอร์ใหม่";
     let s=el("fm_start").value||iso(t), e=el("fm_end").value||s; if(parse(e)<parse(s)) e=s;
     const data={ fid:el("fm_fid").value.trim(), name, description:el("fm_desc").value.trim(), start:s, end:e, status:el("fm_status").value, remark:el("fm_remark").value.trim() };
-    if(editing){ apply(P2=>{ const t2=findNode(P2,featId); if(t2) Object.assign(t2, data); }); closeModal(); toast("บันทึกฟีเจอร์แล้ว"); }
-    else {
-      apply(P2=>{ const C=findNode(P2,containerId); if(!C||C.kind!=="container") return; if(!Array.isArray(C.children)) C.children=[]; const node={ id:nid(), kind:"feature", ...data, custom:{} }; C.children.push(node); revealInto(C); return {focus:node.id}; }); // R6: expand the container + focus the new row
-      closeModal(); toast("เพิ่มฟีเจอร์แล้ว");
-    }
+    apply(P2=>{ if(!canAddChild(P2,containerId)) return; const C=findNode(P2,containerId); if(!Array.isArray(C.children)) C.children=[]; const node={ id:nid(), kind:"feature", ...data, custom:{} }; C.children.push(node); revealInto(C); return {focus:node.id, flash:node.id}; }); // R5 re-check + R6: expand the container, focus AND flash the new row (G6c: create flashes, same as move)
+    closeModal(); toast("เพิ่มฟีเจอร์แล้ว");
   };
 }
 
-/* module modal (with short description) — creates a root container ("main") or a child
-   container under a chosen parent ("sub"). Multi-level: any container can be a parent. */
-function moduleModal(id){
-  const P=proj(), editing=(id!=null)?findNode(P,id):null;
-  if(id!=null && !editing) return;
-  let color=editing?(editing.color||0):(P.modules.length%PALETTE.length);
+/* UNIFIED NODE EDIT MODAL (spec §1.5, D8) — ✎ opens this for ANY node. Replaces the EDIT paths of
+   featureModal/moduleModal. Type Feature/Container is wired to promote/demote through the SAME
+   predicates (R5) — locked when a container has children (canDemote false). Parentage changes happen
+   ONLY via indent/outdent/drag (no parent picker here). Cancel leaves the doc byte-identical (R3).
+   D8b: colour is editable on CONTAINERS only (features render with the parent container's palette). */
+function nodeModal(id){
+  const P=proj(), node=findNode(P,id); if(!node) return;
+  const startFeature = node.kind==="feature";
+  const depth = nodeDepth(P,id);
+  const typeLocked = !startFeature && !canDemote(P,id);                       // container with children → cannot become a feature
+  const subOf = k => k==="feature" ? "ฟีเจอร์ · Feature" : (depth===0 ? "โมดูล · Module" : "โมดูลย่อย · Sub-Module"); // depth naming (§1.2)
+  const t=today();
+  const stOpts=STATUS.map(s=>`<option value="${s.id}" ${s.id===node.status?'selected':''}>${esc(s.th)}</option>`).join("");
+  let color=(node.color!=null?node.color:0)%PALETTE.length;
   const sw=PALETTE.map((p,i)=>`<div class="swatch ${i===color?'on':''}" data-c="${i}" style="background:${p.chip}"></div>`).join("");
-  /* candidate parents = every container EXCEPT the editing node and its own descendants */
-  const banned=new Set(); if(editing) walkTree([editing], n=>banned.add(n.id));
-  const parents=[]; walkTree(P.modules, n=>{ if(n.kind==="container" && !banned.has(n.id)) parents.push(n); });
-  const hasSubs=!!editing && (editing.children||[]).some(c=>c && c.kind==="container"); // a container that already holds sub-containers can't itself become a sub via the modal (v1.0.3 guard)
-  const canSub=parents.length>0 && !hasSubs;
-  const curParent=editing?findParent(P,editing.id):null;                   // null ⇒ currently a root container
-  const isSubNow=!!(editing && curParent && parents.some(m=>m.id===curParent.id)); // currently nested ⇒ a sub-module
-  let kind=isSubNow ? "sub" : "main";                                      // F3: a nested sub-with-children keeps showing "sub" even when the Type control is disabled (don't lie about reality)
-  let parentId=isSubNow ? curParent.id : (parents[0]?parents[0].id:"");
+  const hasKids = !startFeature && Array.isArray(node.children) && node.children.length>0;
+  // G1: the Type lock has TWO causes (canDemote false). Has-children ⇒ "remove the children first";
+  // childless ROOT container ⇒ it can never become a feature (root holds containers only).
+  const lockHint = hasKids
+    ? "มีรายการย่อยอยู่ — ต้องไม่มีรายการข้างในจึงจะเปลี่ยนเป็นฟีเจอร์ได้"
+    : "โมดูลระดับบนสุดเปลี่ยนเป็นฟีเจอร์ไม่ได้";
+  const h2Title = startFeature ? "แก้ไขฟีเจอร์" : (depth===0 ? "แก้ไขโมดูล" : "แก้ไขโมดูลย่อย"); // §1.2 depth naming, consistent with the grip tooltip
+  openModal(`
+    <h2>${h2Title}</h2>
+    <div class="msub" id="nm_sub">${esc(subOf(node.kind))}</div>
+    <div class="field2" id="nm_fidRow" style="${startFeature?'':'display:none'}">
+      <div class="field"><label>รหัส · ID</label><input type="text" id="nm_fid" value="${esc(node.fid||"")}" placeholder="เช่น PRO-PR-01"/></div>
+      <div class="field"><label>สถานะ · Status</label><select id="nm_status">${stOpts}</select></div>
+    </div>
+    <div class="field"><label>ประเภท · Type</label>
+      <div class="seg" id="nm_type">
+        <button type="button" data-t="feature" class="${startFeature?'on':''}" ${typeLocked?'disabled':''}>ฟีเจอร์ · Feature</button>
+        <button type="button" data-t="container" class="${startFeature?'':'on'}" ${typeLocked?'disabled':''}>โมดูล · Container</button>
+      </div>
+      ${typeLocked?`<div class="mmKindHint" id="nm_lockHint">${esc(lockHint)}</div>`:""}
+    </div>
+    <div class="field"><label>ชื่อ · Name</label><input type="text" id="nm_name" value="${esc(node.name||"")}" placeholder="ตั้งชื่อ…"/></div>
+    <div class="field"><label>คำอธิบาย · Description</label><textarea id="nm_desc" placeholder="อธิบายสั้น ๆ (ไม่บังคับ)">${esc(node.description||"")}</textarea></div>
+    <div class="field" id="nm_colorRow" style="${startFeature?'display:none':''}"><label>สี · Colour</label><div class="swatches" id="nm_sw">${sw}</div></div>
+    <div class="field2" id="nm_dateRow" style="${startFeature?'':'display:none'}">
+      <div class="field"><label>วันเริ่ม · Start</label><input type="date" id="nm_start" value="${esc(node.start||iso(t))}"/></div>
+      <div class="field"><label>วันสิ้นสุด · End</label><input type="date" id="nm_end" value="${esc(node.end||iso(addDays(t,7)))}"/></div>
+    </div>
+    <div class="field" id="nm_remarkRow" style="${startFeature?'':'display:none'}"><label>หมายเหตุ · Remark</label><input type="text" id="nm_remark" value="${esc(node.remark||"")}" placeholder="หมายเหตุ (ไม่บังคับ)"/></div>
+    <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="nm_save">บันทึก</button></div>`);
+  el("modalRoot").querySelectorAll('#nm_sw .swatch').forEach(s=> s.onclick=()=>{ color=+s.dataset.c; el("modalRoot").querySelectorAll('#nm_sw .swatch').forEach(x=>x.classList.toggle('on',x===s)); });
+  let selType = startFeature ? "feature" : "container";
+  const typeSeg=el("nm_type");
+  const applyTypeUI=()=>{
+    const feat = selType==="feature";
+    el("nm_fidRow").style.display    = feat?'':'none';
+    el("nm_dateRow").style.display   = feat?'':'none';
+    el("nm_remarkRow").style.display = feat?'':'none';
+    el("nm_colorRow").style.display  = feat?'none':'';   // colour on containers only (D8b)
+    el("nm_sub").textContent = subOf(feat?"feature":"container");
+  };
+  typeSeg.querySelectorAll('button').forEach(b=> b.onclick=()=>{ if(b.disabled) return; selType=b.dataset.t; typeSeg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b)); applyTypeUI(); });
+  el("nm_name").focus();
+  el("nm_save").onclick=()=>{
+    const name=el("nm_name").value.trim()||node.name||"ไม่มีชื่อ", desc=el("nm_desc").value.trim();
+    const wantContainer=(selType==="container");
+    let s=el("nm_start").value||node.start||iso(t), e=el("nm_end").value||s; if(parse(e)<parse(s)) e=s;
+    const fid=el("nm_fid").value.trim(), status=el("nm_status").value, remark=el("nm_remark").value.trim();
+    apply(P2=>{
+      const nd=findNode(P2,id); if(!nd) return;
+      nd.name=name; nd.description=desc;
+      if(wantContainer){
+        if(nd.kind==="feature"){ if(!canPromote(P2,id)) return; promoteCore(nd); }                       // G5: promote via the shared core (R5 re-check, not the UI)
+        nd.color=color;
+      } else {
+        if(nd.kind==="container"){ if(!canDemote(P2,id)) return; demoteCore(nd); }                        // G5: demote via the shared core (R5+G1 re-check: childless NON-root only)
+        if(!nd.custom||typeof nd.custom!=="object") nd.custom={};
+        nd.fid=fid; nd.start=s; nd.end=e; nd.status=status; nd.remark=remark;                            // feature field edits (end≥start clamped above)
+      }
+      return {flash:id};
+    });
+    closeModal(); toast("บันทึกแล้ว");
+  };
+}
+
+/* module modal — CREATE-ONLY (D8: nodeModal owns all EDIT paths; a container's parentage now
+   changes ONLY via indent/outdent/drag). Creates a root container ("main") or a child container
+   under a chosen parent ("sub"); optional picker moves existing features into the new module. */
+function moduleModal(){
+  const P=proj();
+  let color=(P.modules.length%PALETTE.length);
+  const sw=PALETTE.map((p,i)=>`<div class="swatch ${i===color?'on':''}" data-c="${i}" style="background:${p.chip}"></div>`).join("");
+  const parents=[]; walkTree(P.modules, n=>{ if(n.kind==="container") parents.push(n); });    // any container can be a parent
+  const canSub=parents.length>0;
+  let kind="main";
+  let parentId=parents[0]?parents[0].id:"";
   const parentOpts=parents.map(m=>`<option value="${esc(m.id)}" ${m.id===parentId?'selected':''}>${esc(m.name)}</option>`).join("");
-  const kindHint=hasSubs ? "มีโมดูลย่อยอยู่ — ย้ายหรือเลื่อนขั้นโมดูลย่อยก่อน"
-              : (parents.length===0 ? "ยังไม่มีโมดูลหลักอื่นให้สังกัด — สร้างโมดูลหลักก่อน" : "");
-  /* create-mode only: optional picker to MOVE existing features (from any container) into the new module */
+  const kindHint=parents.length===0 ? "ยังไม่มีโมดูลหลักอื่นให้สังกัด — สร้างโมดูลหลักก่อน" : "";
+  /* optional picker to MOVE existing features (from any container) into the new module */
   let pickerHtml="";
-  if(!editing){
-    let totalFeats=0; walkFeatures(P, ()=>totalFeats++);
-    if(totalFeats===0){
-      pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpEmpty">ยังไม่มีฟีเจอร์ให้ย้าย — สร้างฟีเจอร์ในโมดูลอื่นก่อน</div></div>`;
-    }else{
-      const grp=[]; walkTree(P.modules, n=>{ if(n.kind==="container"){ const df=directFeatures(n); if(df.length) grp.push({m:n,feats:df}); } });
-      const groups=grp.map(({m,feats})=>{
-        const p=PALETTE[(m.color||0)%PALETTE.length];
-        const rows=feats.map(f=>`<label class="mpFeat"><input type="checkbox" class="mpChk" data-featid="${esc(f.id)}"/>${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}<span class="mpFeatName">${esc(f.name)}</span></label>`).join("");
-        return `<div class="mpGroup"><label class="mpHead"><input type="checkbox" class="mpAll"/><span class="chip" style="background:${p.chip}"></span><span class="mpModName">${esc(m.name)}</span><span class="count">${feats.length}</span></label>${rows}</div>`;
-      }).join("");
-      pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpList" id="mm_pick">${groups}</div><div class="mpCounter" id="mm_pickCount">เลือกแล้ว 0 ฟีเจอร์</div></div>`;
-    }
+  let totalFeats=0; walkFeatures(P, ()=>totalFeats++);
+  if(totalFeats===0){
+    pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpEmpty">ยังไม่มีฟีเจอร์ให้ย้าย — สร้างฟีเจอร์ในโมดูลอื่นก่อน</div></div>`;
+  }else{
+    const grp=[]; walkTree(P.modules, n=>{ if(n.kind==="container"){ const df=directFeatures(n); if(df.length) grp.push({m:n,feats:df}); } });
+    const groups=grp.map(({m,feats})=>{
+      const p=PALETTE[(m.color||0)%PALETTE.length];
+      const rows=feats.map(f=>`<label class="mpFeat"><input type="checkbox" class="mpChk" data-featid="${esc(f.id)}"/>${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}<span class="mpFeatName">${esc(f.name)}</span></label>`).join("");
+      return `<div class="mpGroup"><label class="mpHead"><input type="checkbox" class="mpAll"/><span class="chip" style="background:${p.chip}"></span><span class="mpModName">${esc(m.name)}</span><span class="count">${feats.length}</span></label>${rows}</div>`;
+    }).join("");
+    pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpList" id="mm_pick">${groups}</div><div class="mpCounter" id="mm_pickCount">เลือกแล้ว 0 ฟีเจอร์</div></div>`;
   }
   openModal(`
-    <h2>${editing?"แก้ไขโมดูล":"สร้างโมดูล"}</h2>
+    <h2>สร้างโมดูล</h2>
     <div class="msub">โมดูลคือกลุ่มของฟีเจอร์ในแผนงาน</div>
-    <div class="field"><label>ชื่อโมดูล · Module name</label><input type="text" id="mm_name" value="${editing?esc(editing.name):""}" placeholder="เช่น Procurement P2P (Section B)"/></div>
-    <div class="field"><label>คำอธิบายสั้น · Short description</label><textarea id="mm_desc" placeholder="อธิบายสั้น ๆ เช่น 43 features — PR, PO, GR, Reports">${editing?esc(editing.description||""):""}</textarea></div>
+    <div class="field"><label>ชื่อโมดูล · Module name</label><input type="text" id="mm_name" value="" placeholder="เช่น Procurement P2P (Section B)"/></div>
+    <div class="field"><label>คำอธิบายสั้น · Short description</label><textarea id="mm_desc" placeholder="อธิบายสั้น ๆ เช่น 43 features — PR, PO, GR, Reports"></textarea></div>
     <div class="field"><label>ประเภท · Type</label>
       <div class="seg" id="mm_kind">
         <button type="button" data-k="main" class="${kind==='main'?'on':''}">โมดูลหลัก · Module</button>
@@ -1400,7 +1588,7 @@ function moduleModal(id){
     <div class="field" id="mm_parentField" style="${kind==='sub'?'':'display:none'}"><label>สังกัดโมดูลหลัก · Parent module</label><select id="mm_parent" ${canSub?'':'disabled'}>${parentOpts}</select></div>
     <div class="field"><label>สี · Colour</label><div class="swatches" id="mm_sw">${sw}</div></div>
     ${pickerHtml}
-    <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="mm_save">${editing?"บันทึก":"สร้างโมดูล"}</button></div>`);
+    <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="mm_save">สร้างโมดูล</button></div>`);
   el("modalRoot").querySelectorAll('#mm_sw .swatch').forEach(s=> s.onclick=()=>{ color=+s.dataset.c; el("modalRoot").querySelectorAll('#mm_sw .swatch').forEach(x=>x.classList.toggle('on',x===s)); });
   const kindSeg=el("mm_kind"), parentField=el("mm_parentField");
   kindSeg.querySelectorAll('button').forEach(b=> b.onclick=()=>{ if(b.disabled) return; kind=b.dataset.k; kindSeg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b)); if(parentField) parentField.style.display=(kind==='sub')?'':'none'; });
@@ -1421,24 +1609,7 @@ function moduleModal(id){
   el("mm_save").onclick=()=>{
     const name=el("mm_name").value.trim()||"โมดูลใหม่", desc=el("mm_desc").value.trim();
     const pSel=el("mm_parent");
-    // F3: a save must NEVER change parentage unless the user explicitly changed it. When the Type control is
-    // disabled (!canSub — e.g. a nested sub that has its own sub-containers), keep the CURRENT parent (curParent),
-    // not null — otherwise a plain rename silently re-homes the whole subtree to root.
-    const newParentId=(editing && !canSub)
-      ? (curParent ? curParent.id : null)
-      : ((kind==='sub' && pSel && pSel.value) ? pSel.value : null);              // null ⇒ root container; set ⇒ child of that container
-    if(editing){
-      apply(P2=>{ const node=findNode(P2,id); if(!node) return; node.name=name; node.description=desc; node.color=color;
-        const cur=findParent(P2,id), curId=cur?cur.id:null;
-        if(newParentId!==curId){                                            // reparent (main ⇄ sub) — remove then re-insert
-          const g=removeNode(P2,id); if(!g) return;
-          const np=newParentId?findNode(P2,newParentId):null;
-          if(np && np.kind==="container"){ if(!Array.isArray(np.children)) np.children=[]; np.children.push(g); revealInto(np); }
-          else P2.modules.push(g);
-        }
-      });
-      closeModal(); toast("บันทึกโมดูลแล้ว"); return;
-    }
+    const newParentId=(kind==='sub' && pSel && pSel.value) ? pSel.value : null;   // null ⇒ root container; set ⇒ child of that container
     let selIds=[]; const pk=el("mm_pick"); if(pk) selIds=Array.from(pk.querySelectorAll('.mpChk:checked')).map(c=>c.dataset.featid);
     let moved=0;
     apply(P2=>{
@@ -1447,6 +1618,7 @@ function moduleModal(id){
       if(np && np.kind==="container"){ if(!Array.isArray(np.children)) np.children=[]; np.children.push(node); revealInto(np); }
       else P2.modules.push(node);
       selIds.forEach(fid=>{ const f=findNode(P2,fid); if(f && f.kind==="feature"){ const g=removeNode(P2,fid); if(g){ node.children.push(g); moved++; } } }); // move picked features in (preserve object ref)
+      return {flash:node.id};                                                    // G6c: create flashes the new module row (same reveal-and-flash rule as a move, R6)
     });
     closeModal();
     toast(moved>0 ? `สร้างโมดูลแล้ว · ย้าย ${moved} ฟีเจอร์เข้าโมดูล` : "สร้างโมดูลแล้ว");
@@ -1668,7 +1840,7 @@ function moveNodeBeside(id, sibId, before){
   if(from<0||ref<0) return;
   let to=ref+(before?0:1); if(from<to) to-=1;                                 // account for the removal shift
   if(to===from) return;                                                       // already in place
-  apply(P2=>{ const a=findParent(P2,id), list=a?a.children:P2.modules; const g=removeNode(P2,id); if(!g) return; let t=list.findIndex(n=>n&&n.id===sibId); if(t<0){ list.push(g); return; } if(!before) t+=1; list.splice(t,0,g); });
+  apply(P2=>{ const a=findParent(P2,id), list=a?a.children:P2.modules; const g=removeNode(P2,id); if(!g) return; let t=list.findIndex(n=>n&&n.id===sibId); if(t<0){ list.push(g); return {flash:id}; } if(!before) t+=1; list.splice(t,0,g); return {flash:id}; }); // R6: flash the reordered module
 }
 
 /* =====================  COLUMN DRAG-REORDER  ===================== */
@@ -1727,7 +1899,7 @@ function onColResizeMove(e){
   w=Math.max(60, Math.min(640, w)); colResize.w=w;
   colResize.head.style.width=w+'px';                 // live: header
   const lb=el("leftBody");
-  lb.querySelectorAll('.featRow').forEach(fr=>{ const cell=fr.children[colResize.idx]; if(cell) cell.style.width=w+'px'; }); // live: every cell in this column
+  lb.querySelectorAll('.featRow .rowMain').forEach(rm=>{ const cell=rm.children[colResize.idx]; if(cell) cell.style.width=w+'px'; }); // live: every cell in this column (G2: cells now live inside .rowMain, not as direct featRow children)
   const total=[...el("leftHead").children].reduce((a,h)=>a+h.getBoundingClientRect().width,0);
   lb.querySelectorAll('.modRow').forEach(r=> r.style.width=total+'px'); // keep module bands spanning full width
   if(ui.wrapTxt) syncRowHeights();                   // content-driven row height follows the new width live
@@ -1955,5 +2127,12 @@ document.addEventListener('keydown', e=>{
   if(e.key==="Escape"){
     if(el("modalRoot").style.display==="block") closeModal();
     else if(el("historyOverlay").style.display==="flex" && PID) location.hash="project="+PID;
+    else {
+      const a=document.activeElement; if(a && a.closest && a.closest('.gripMenu')) a.blur();  // keyboard-opened menu: releases :focus-within
+      // G4: a HOVER-opened menu has no focus to blur → force it shut with .gmSuppress (CSS suppresses
+      // the :hover open even while the pointer stays on the grip), auto-cleared on pointerleave so a
+      // later move-away + re-hover opens it again.
+      document.querySelectorAll('.gripMenu:hover').forEach(gm=>{ gm.classList.add('gmSuppress'); gm.addEventListener('pointerleave', ()=>gm.classList.remove('gmSuppress'), {once:true}); });
+    }
   }
 });

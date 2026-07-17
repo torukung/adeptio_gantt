@@ -247,13 +247,42 @@ async function assertAligned(page, label = "") {
 }
 
 /* ------------------------------- interactions ---------------------------- */
-// Hover the module row (reveals the opacity:0 .modActs cluster) then click an action.
+// D7: the grip menu REPLACES the v1.0.3 hover clusters (.modActs/.rowActs). Hover the module row's
+// GRIP to slide the pill open, then click the [data-act] button (same act names as the old cluster,
+// plus new indent/outdent/promote). The menu opens on grip hover only — never plain row hover.
+//
+// The pill reveals via a clip-path animation, and clip-path suppresses pointer events on the still-
+// clipped region — so under CPU load a click aimed before the reveal finishes can fall through the
+// clipped pill, drop the grip's :hover, and close the menu (a flake). We therefore wait until the
+// target button is actually the top hit-target at its own centre (fully revealed) before clicking.
+// The mouse stays parked on the grip during the wait, so the menu keeps animating open.
+async function _pillButtonReady(page, rowSel, act) {
+  await page.waitForFunction(
+    ({ rowSel, act }) => {
+      const b = document.querySelector(`${rowSel} .gripPill [data-act="${act}"]`);
+      if (!b) return false;
+      const r = b.getBoundingClientRect();
+      if (r.width < 1) return false;
+      const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return !!el && (b === el || b.contains(el));
+    },
+    { rowSel, act }
+  );
+}
 async function clickModAct(page, name, act) {
   const nid = await nidOf(page, name);
   expect(nid, `module "${name}" not found`).not.toBeNull();
-  const row = page.locator(`#leftBody .modRow[data-nid="${nid}"]`);
-  await row.hover();
-  await row.locator(`[data-act="${act}"]`).click();
+  const rowSel = `#leftBody .modRow[data-nid="${nid}"]`;
+  await page.locator(`${rowSel} .modGrip`).hover();
+  await _pillButtonReady(page, rowSel, act);
+  await page.locator(`${rowSel} .gripPill [data-act="${act}"]`).click();
+}
+// Sibling helper for feature rows (addressed by node id): hover the feature grip → click the pill action.
+async function clickFeatAct(page, nid, act) {
+  const rowSel = `#leftBody .featRow[data-nid="${nid}"]`;
+  await page.locator(`${rowSel} .grip[data-act="rowdrag"]`).hover();
+  await _pillButtonReady(page, rowSel, act);
+  await page.locator(`${rowSel} .gripPill [data-act="${act}"]`).click();
 }
 
 // Pointer-drag a module by its grip to a target module row. The app hit-tests with
@@ -330,6 +359,7 @@ module.exports = {
   alignmentSnapshot,
   assertAligned,
   clickModAct,
+  clickFeatAct,
   dragModule,
   dragFeature,
 };

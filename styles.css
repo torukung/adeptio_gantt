@@ -220,9 +220,17 @@ button{font-family:inherit; cursor:pointer;}
 .colGhost{position:fixed; z-index:90; pointer-events:none; opacity:.92; height:var(--headH); display:flex; align-items:center; padding:0 10px; background:var(--panel); border:1px solid var(--violet-adpt); border-radius:var(--r-sm); font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; color:var(--ink-soft); text-transform:uppercase; box-shadow:var(--shadow-hover);}
 #leftBody{min-width:max-content;}
 
-.modRow{display:flex; align-items:center; gap:8px; height:var(--modH); padding:0 8px 0 6px; background:linear-gradient(180deg,#fbfaff,#f4f2fb); border-bottom:1px solid var(--line-strong); position:relative;}
+.modRow{display:flex; align-items:center; gap:8px; height:var(--modH); padding:0 8px 0 6px; border-bottom:1px solid var(--line-strong); position:relative;
+  background-color:var(--panel);
+  background-image:
+    repeating-linear-gradient(90deg, var(--rail) 0 2px, transparent 2px var(--step)),   /* Stage-2: ancestor rail ladder (only where --ladderW>0) */
+    linear-gradient(var(--shade), var(--shade)),                                         /* Stage-2: stepped indent shading */
+    linear-gradient(180deg,#fbfaff,#f4f2fb);                                             /* base module gradient */
+  background-repeat:no-repeat,no-repeat,no-repeat;
+  background-position:var(--rail-x) 0, 0 0, 0 0;
+  background-size:var(--ladderW) 100%, 100% 100%, 100% 100%;}
 .modRow.dropInto{box-shadow:inset 0 0 0 2px var(--violet-adpt);}
-.addFeat.dropInto{box-shadow:inset 0 0 0 2px var(--violet-adpt); background:#f3ecff;}
+.addFeat.dropInto{box-shadow:inset 0 0 0 2px var(--violet-adpt); background-color:#f3ecff;} /* G3: colour-only, keep the ladder/shade layers */
 .caret{width:18px; height:18px; display:flex; align-items:center; justify-content:center; color:var(--ink-soft); border-radius:6px; flex:0 0 auto;}
 .caret:hover{background:var(--line);}
 .caret svg{width:12px; height:12px; transition:transform .15s;}
@@ -233,20 +241,33 @@ button{font-family:inherit; cursor:pointer;}
 .modName:focus{box-shadow:0 0 0 2px var(--violet-adpt); border-radius:4px;}
 .modDesc{font-size:10.5px; color:var(--ink-faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:280px;}
 .count{font-family:var(--mono); font-size:10.5px; color:var(--ink-faint); background:var(--surface); padding:1px 8px; border-radius:20px; flex:0 0 auto;}
-.modActs{display:flex; gap:2px; margin-left:auto; opacity:0; transition:.12s;}
-.modRow:hover .modActs{opacity:1;}
-/* module grip (Feature 2.1/2.2): always visible, dimmed → full on hover; same visual language as feature-row grips */
-.modGrip{width:16px; flex:0 0 auto; display:flex; align-items:center; justify-content:center; color:var(--grey-light-adpt); cursor:grab; touch-action:none; opacity:.5; transition:opacity .12s, color .12s;}
+/* modMain = the shiftable row content (caret/chip/name/count). It slides right by the measured
+   pill width (--railW) when the grip menu opens, so the menu never overlays content. */
+.modMain{display:flex; align-items:center; gap:8px; flex:1 1 auto; min-width:0; transition:transform .2s var(--ease);}
+/* While the menu is open the shifted content must not intercept clicks meant for the pill (the caret
+   is only used when the menu is CLOSED). pointer-events returns the instant the menu closes. */
+.gripMenu:hover ~ .modMain, .gripMenu:focus-within ~ .modMain{transform:translateX(var(--railW,0px)); pointer-events:none;}
+/* module grip (drag handle + menu trigger): always visible, dimmed → full on hover */
+.modGrip{width:16px; flex:0 0 auto; display:flex; align-items:center; justify-content:center; color:var(--grey-light-adpt); cursor:grab; touch-action:none; opacity:.55; transition:opacity .12s, color .12s;}
 .modGrip:hover{color:var(--ink-soft); opacity:1;}
 .modRow:hover .modGrip{opacity:1;}
 .modGrip svg{width:13px; height:13px;}
-.modRow.modDropBefore{box-shadow:inset 0 3px 0 var(--violet-adpt); background:#f0e9ff;}
-.modRow.modDropAfter{box-shadow:inset 0 -3px 0 var(--violet-adpt); background:#f0e9ff;}
+.modRow.modDropBefore{box-shadow:inset 0 3px 0 var(--violet-adpt); background-color:#f0e9ff;} /* G3: colour-only (modRow carries the rail/shade layers too) */
+.modRow.modDropAfter{box-shadow:inset 0 -3px 0 var(--violet-adpt); background-color:#f0e9ff;}
 
-.featRow{display:flex; align-items:stretch; height:var(--rowH); border-bottom:1px solid var(--line); background:var(--panel);}
-.featRow:hover{background:#faf9ff;}
-.featRow.dropBefore{box-shadow:inset 0 3px 0 var(--violet-adpt); background:#f6f0ff;}
-.featRow.dropAfter{box-shadow:inset 0 -3px 0 var(--violet-adpt); background:#f6f0ff;}
+.featRow{display:flex; align-items:stretch; height:var(--rowH); border-bottom:1px solid var(--line); position:relative;  /* G2: anchor for the absolute grip menu at the row front */
+  background-color:var(--panel);
+  background-image:
+    repeating-linear-gradient(90deg, var(--rail) 0 2px, transparent 2px var(--step)),   /* Stage-2 ancestor rail ladder */
+    linear-gradient(var(--shade), var(--shade));                                         /* Stage-2 stepped shading */
+  background-repeat:no-repeat,no-repeat;
+  background-position:var(--rail-x) 0, 0 0;
+  background-size:var(--ladderW) 100%, 100% 100%;}
+/* G3: hover / drag-mark tints use background-COLOR only — the shorthand would reset background-image
+   and wipe the Stage-2 ancestor-rail ladder + stepped shade layers. */
+.featRow:hover{background-color:#faf9ff;}
+.featRow.dropBefore{box-shadow:inset 0 3px 0 var(--violet-adpt); background-color:#f6f0ff;}
+.featRow.dropAfter{box-shadow:inset 0 -3px 0 var(--violet-adpt); background-color:#f6f0ff;}
 .cell{flex:0 0 auto; border-right:1px solid var(--line); padding:0 8px; display:flex; align-items:center; min-width:0; position:relative;}
 .cell.feat{padding-left:4px;}
 .grip{width:16px; flex:0 0 auto; display:flex; align-items:center; justify-content:center; color:var(--grey-light-adpt); cursor:grab; touch-action:none;}
@@ -263,12 +284,24 @@ button{font-family:inherit; cursor:pointer;}
 .statusSel{width:100%; border:1px solid var(--line-strong); border-radius:var(--r-xs); padding:4px 4px 4px 10px; font-family:inherit; font-size:12px; color:var(--ink); background:#fff; appearance:none; -webkit-appearance:none; cursor:pointer;}
 .statusSel:focus{outline:none; border-color:var(--violet-adpt);}
 
-.rowActs{position:absolute; right:5px; top:50%; transform:translateY(-50%); display:flex; gap:1px; background:#fff; padding:2px; border-radius:8px; box-shadow:var(--shadow-chip); z-index:4; opacity:.45; transition:opacity .12s;}
-.featRow:hover .rowActs{opacity:1;}
-.rowActs .iconbtn{width:22px; height:22px;}
-.rowActs .iconbtn svg{width:12px; height:12px;}
-.addFeat{display:flex; align-items:center; gap:6px; height:32px; padding:0 8px 0 calc(6px + var(--step) * var(--lvl, 1)); color:var(--violet-adpt); font-size:12.5px; cursor:pointer; border-bottom:1px solid var(--line); background:var(--panel);}
-.addFeat:hover{background:#f5f1ff;}
+/* G2: feature-row content slide — feature rows now mirror container rows. The grip menu is an ABSOLUTE
+   anchor at the row FRONT (zero flow width, so .rowMain's cells still start at x=0 and line up with the
+   header columns — closed-state geometry is unchanged). On grip hover/focus-within, .rowMain (the whole
+   cell strip) slides right so the open pill fills the vacated space to the left and never overlays a cell,
+   with the same pointer-events:none-while-open rule as .modMain. The pill opens at the grip's right edge
+   (left:100%), so the shift = pill width (--railW) + the grip's own 16px → the shifted cells clear the pill. */
+.featRow > .gripMenu{position:absolute; left:0; top:0; bottom:0; z-index:6;}
+.rowMain{display:flex; align-items:stretch; flex:1 1 auto; min-width:0; transition:transform .2s var(--ease);}
+.featRow > .gripMenu:hover ~ .rowMain, .featRow > .gripMenu:focus-within ~ .rowMain{transform:translateX(calc(var(--railW,0px) + 16px)); pointer-events:none;}
+.addFeat{display:flex; align-items:center; gap:6px; height:32px; padding:0 8px 0 calc(6px + var(--step) * var(--lvl, 1)); color:var(--violet-adpt); font-size:12.5px; cursor:pointer; border-bottom:1px solid var(--line);
+  background-color:var(--panel);
+  background-image:
+    repeating-linear-gradient(90deg, var(--rail) 0 2px, transparent 2px var(--step)),   /* Stage-2 ancestor rail ladder */
+    linear-gradient(var(--shade), var(--shade));                                         /* Stage-2 stepped shading */
+  background-repeat:no-repeat,no-repeat;
+  background-position:var(--rail-x) 0, 0 0;
+  background-size:var(--ladderW) 100%, 100% 100%;}
+.addFeat:hover{background-color:#f5f1ff;} /* G3: colour-only, keep the ladder/shade layers */
 .addFeat svg{width:13px; height:13px;}
 
 /* ===== MODULE HIERARCHY — step indent (2.4) + sub-module tree rails (2.2.2) =====
@@ -276,17 +309,64 @@ button{font-family:inherit; cursor:pointer;}
    rows stay full-width for borders + drag hit-testing. Rails are per-row ::before/
    ::after segments (top:0 / bottom:0) so any row height works, wrapTxt included. */
 :root{ --step:24px; --rail:rgba(146,65,255,.34); --rail-x:50px; }
+/* Stage-2 (§1.9 left pane): stepped indent shading --shade = rgba(146,65,255, .03 × depth), and the
+   ancestor rail-ladder width --ladderW = --step × ancestorCount. Both are pure BACKGROUND (drawn by
+   the .modRow/.featRow/.addFeat background stacks above) → zero effect on row height (R11 alignment).
+   G6a: --shade is set INLINE per row by renderGrid (shadeVar) using the exact, UNBOUNDED .03×depth
+   formula — the old per-level class clamp is gone. This default is the depth-0 (no-tint) fallback. */
+.modRow,.featRow,.addFeat{ --shade:transparent; --ladderW:0px; }
+.subMod{ --ladderW:calc(var(--step) * (var(--lvl) - 1)); }                 /* container: one pass-through rail per ancestor level */
+.featRow.subScope, .addFeat.subScope{ --ladderW:calc(var(--step) * (var(--lvl) - 2)); }
 /* v1.0.4 — PROPORTIONAL indent at ANY depth (R11): each row carries an inline --lvl = its
    tree depth; padding lives INSIDE the row (never a margin/height change), so row heights
    stay --modH / --rowH at every depth. depth 0/1 reproduce the v1.0.3 one/two-step values. */
 .cell.feat{padding-left:calc(4px + var(--step) * var(--lvl, 1));}       /* feature: 4px + (depth) steps */
 .subMod .chip{margin-left:calc(var(--step) * var(--lvl, 1));}          /* sub-container header: chip + name shift (depth) steps */
 .subMod .modName{font-weight:500;}                                     /* lighter than a root's 700 → hierarchy reads */
-/* 2.2.2 — vertical rail on every sub row + elbow into each sub-module header */
+/* 2.2.2 — own-level 2px vertical rail (::before) + elbow (::after), generalised to ANY depth by
+   shifting one --step per level; ancestor pass-through rails are the repeating-gradient ladder above. */
 .subMod, .featRow.subScope, .addFeat.subScope{position:relative;}
-.subMod::before, .featRow.subScope::before, .addFeat.subScope::before{content:""; position:absolute; left:var(--rail-x); top:0; bottom:0; width:2px; background:var(--rail); pointer-events:none;}
-.subMod::after{content:""; position:absolute; left:var(--rail-x); top:calc(50% - 1px); width:calc(var(--step) + 6px); height:2px; background:var(--rail); pointer-events:none;}
-.subEnd::before{bottom:auto; height:calc(50% + 1px);}                  /* terminate the parent rail at its last sub block's elbow */
+.subMod::before{content:""; position:absolute; left:calc(var(--rail-x) + var(--step) * (var(--lvl) - 1)); top:0; bottom:0; width:2px; background:var(--rail); pointer-events:none;}
+.featRow.subScope::before, .addFeat.subScope::before{content:""; position:absolute; left:calc(var(--rail-x) + var(--step) * (var(--lvl) - 2)); top:0; bottom:0; width:2px; background:var(--rail); pointer-events:none;}
+.subMod::after{content:""; position:absolute; left:calc(var(--rail-x) + var(--step) * (var(--lvl) - 1)); top:calc(50% - 1px); width:calc(var(--step) + 6px); height:2px; background:var(--rail); pointer-events:none;}
+.subEnd::before{bottom:auto; height:calc(50% + 1px);}                  /* terminate the own rail at its last sub block's elbow */
+
+/* ===== GRIP MENU (Stage 2, §1.1 / D7) — slide-open pill of row actions =====
+   Opens on GRIP hover / focus-within ONLY (never plain row hover). The pill is absolutely
+   positioned right of the grip and revealed via clip-path (slides open to the right) with a
+   staggered per-button fade. --railW (measured per row in JS from the real pill width) is how
+   far .modMain / the feature .txt slide right so the open pill never overlays content. */
+.gripMenu{position:relative; display:flex; align-items:center; flex:0 0 auto;}
+.gripPill{position:absolute; left:100%; top:50%; transform:translateY(-50%); display:flex; align-items:center; gap:1px;
+  padding:2px; background:#fff; border:1px solid var(--line-strong); border-radius:var(--r-pill); box-shadow:var(--shadow-chip);
+  white-space:nowrap; z-index:6; opacity:0; pointer-events:none; clip-path:inset(0 100% 0 0 round var(--r-pill));
+  transition:clip-path .22s var(--ease), opacity .16s var(--ease);}
+.gripMenu:hover > .gripPill, .gripMenu:focus-within > .gripPill{opacity:1; pointer-events:auto; clip-path:inset(0 0 0 0 round var(--r-pill));}
+.gripPill > button.gm{width:24px; height:24px; flex:0 0 auto; padding:0; border:1px solid transparent; background:transparent; color:var(--ink-soft); border-radius:7px; display:flex; align-items:center; justify-content:center; cursor:pointer; opacity:0; transition:opacity .16s var(--ease), background .12s, color .12s, border-color .12s;}
+.gripPill > button.gm svg{width:13px; height:13px;}
+.gripPill > button.gm:hover{background:var(--surface); color:var(--violet-adpt); border-color:var(--line-strong);}
+.gripPill > button.gm.danger:hover{color:var(--ruby-adpt); border-color:#f3c2cf;}
+.gripPill > button.gm:disabled{color:var(--ink-faint); cursor:not-allowed;}
+.gripPill .gsep{flex:0 0 auto; width:1px; height:15px; background:var(--line-strong); margin:0 3px;}
+/* staggered reveal (transition-delay per position; gsep sit at child 3 & 6, so buttons are 1,2,4,5,7,8,9,10) */
+.gripMenu:hover > .gripPill > button.gm, .gripMenu:focus-within > .gripPill > button.gm{opacity:1;}
+.gripMenu:hover > .gripPill > button.gm:disabled, .gripMenu:focus-within > .gripPill > button.gm:disabled{opacity:.4;}
+.gripPill > button.gm:nth-child(1){transition-delay:.02s;} .gripPill > button.gm:nth-child(2){transition-delay:.05s;}
+.gripPill > button.gm:nth-child(4){transition-delay:.08s;} .gripPill > button.gm:nth-child(5){transition-delay:.11s;}
+.gripPill > button.gm:nth-child(7){transition-delay:.14s;} .gripPill > button.gm:nth-child(8){transition-delay:.17s;}
+.gripPill > button.gm:nth-child(9){transition-delay:.20s;} .gripPill > button.gm:nth-child(10){transition-delay:.23s;}
+/* G4: Esc force-closes a HOVER-opened menu by stamping .gmSuppress on the .gripMenu — these override
+   the :hover-open rules (extra class ⇒ higher/equal-and-later specificity) so the pill stays shut and
+   the content stays put even while the pointer remains on the grip. JS clears the class on pointerleave
+   (one-shot), so moving away and re-hovering opens it again. The focus-within/blur path is untouched. */
+.gripMenu.gmSuppress:hover > .gripPill{opacity:0; pointer-events:none; clip-path:inset(0 100% 0 0 round var(--r-pill));}
+.gripMenu.gmSuppress:hover > .gripPill > button.gm{opacity:0;}
+.gripMenu.gmSuppress:hover ~ .modMain, .featRow > .gripMenu.gmSuppress:hover ~ .rowMain{transform:none; pointer-events:auto;}
+
+/* R6 reveal-and-flash: a transient violet pulse on the moved/created row in BOTH panes (~1.2s),
+   removed on animationend. Uses an inset box-shadow flood so it reads over any row background. */
+@keyframes flashPulse{ 0%{box-shadow:inset 0 0 0 200px rgba(146,65,255,.28);} 100%{box-shadow:inset 0 0 0 200px rgba(146,65,255,0);} }
+.flashRow{animation:flashPulse 1.2s var(--ease);}
 
 /* timeline */
 #axis{position:relative; min-width:max-content;}
@@ -399,7 +479,7 @@ button{font-family:inherit; cursor:pointer;}
 /* print: hide chrome */
 @media print{
   body,#app,#proj{height:auto; overflow:visible;}
-  #topbar,#summaryPanel,.rowActs,.modActs,.grip,.modGrip,.handle,.addFeat,#splitter{display:none !important;}
+  #topbar,#summaryPanel,.gripMenu,.handle,.addFeat,#splitter{display:none !important;}
   #board{overflow:visible; display:block;}
   #leftScroll,#rightScroll{overflow:visible;}
 }

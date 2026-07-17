@@ -196,50 +196,53 @@ test.describe("2.2.1 — module modal type + parent picker", () => {
     expect(docParentOf(doc, created.id).id).toBe("m-beta");
   });
 
-  test("editing a MAIN that has subs DISABLES the Sub-Module option with the Thai hint", async ({ page }) => {
+  // D8: editmod now opens the unified nodeModal. A container WITH children can't become a feature
+  // (canDemote false) → the Type control is LOCKED with a Thai hint (moduleModal's edit path is retired).
+  test("editing a container that has children LOCKS the Type control (can't demote) with the Thai hint", async ({ page }) => {
     await openTimeline(page, SEED_B());
     await clickModAct(page, "Alpha", "editmod");
-    await expect(page.locator("#mm_name")).toHaveValue("Alpha");
-    await expect(page.locator('#mm_kind button[data-k="sub"]')).toBeDisabled();
-    await expect(page.locator(".mmKindHint")).toHaveText("มีโมดูลย่อยอยู่ — ย้ายหรือเลื่อนขั้นโมดูลย่อยก่อน");
+    await expect(page.locator("#nm_name")).toHaveValue("Alpha");
+    await expect(page.locator('#nm_type button[data-t="feature"]')).toBeDisabled();
+    await expect(page.locator('#nm_type button[data-t="container"]')).toBeDisabled();
+    await expect(page.locator("#nm_lockHint")).toHaveText("มีรายการย่อยอยู่ — ต้องไม่มีรายการข้างในจึงจะเปลี่ยนเป็นฟีเจอร์ได้");
   });
 
-  test("parent <select> excludes the module being edited", async ({ page }) => {
+  // D8: parentage changes are removed from the edit modal (they happen via indent/outdent/drag only),
+  // so the unified nodeModal has NO parent <select> at all — it offers a Type Feature/Container instead.
+  test("the edit modal has no parent picker (reparenting is via indent/outdent/drag only) [D8]", async ({ page }) => {
     await openTimeline(page, SEED_A());
     await clickModAct(page, "Beta", "editmod");
-    await page.locator('#mm_kind button[data-k="sub"]').click();
-    const opts = await page.$$eval("#mm_parent option", (o) => o.map((x) => x.textContent));
-    expect(opts).toContain("Alpha");
-    expect(opts).toContain("Gamma");
-    expect(opts).not.toContain("Beta"); // self excluded as a parent candidate
+    await expect(page.locator("#nm_name")).toHaveValue("Beta");
+    await expect(page.locator("#mm_parent")).toHaveCount(0);   // no parent <select> under the create-modal id
+    await expect(page.locator("#nm_parent")).toHaveCount(0);   // …nor under an nm_ id
+    await expect(page.locator("#modalRoot select")).toHaveCount(1); // exactly ONE <select> (the status select) — a reintroduced picker under ANY id would make this 2
+    await expect(page.locator("#nm_type")).toBeVisible();      // Type Feature/Container control instead
   });
 
-  // F3: editing a NESTED sub that has its own sub-containers has the Type control disabled. A plain
-  // rename must keep its parent (the save must never change parentage unless the user changed it) —
-  // the v1.0.3-carryover bug silently re-homed the whole subtree to root.
-  test("renaming a nested sub-with-children keeps its parent (no silent reparent to root) [F3]", async ({ page }) => {
+  // Renaming a nested sub-with-children must keep its parent + subtree. Under D8 the edit modal never
+  // reparents (the old F3 silent-reparent-to-root bug is now structurally impossible — no parentage control).
+  test("renaming a nested sub-with-children keeps its parent + subtree (no reparent) [D8]", async ({ page }) => {
     await openTimeline(page, SEED_A());
-    // build Alpha > Sub1 > Sub2 through the modal
+    // build Alpha > Sub1 > Sub2 through the CREATE modal (moduleModal create is unchanged)
     await createSubViaModal(page, "Sub1", "m-alpha");
     const sub1Id = docFindByName(await readDoc(page), "Sub1").id;
     await createSubViaModal(page, "Sub2", sub1Id); // Sub2 nested under Sub1 ⇒ Sub1 now holds a sub-container
     expect(docParentOf(await readDoc(page), docFindByName(await readDoc(page), "Sub2").id).id).toBe(sub1Id);
 
     await clickModAct(page, "Sub1", "editmod");
-    await expect(page.locator("#mm_name")).toHaveValue("Sub1");
-    await expect(page.locator('#mm_kind button[data-k="sub"]')).toBeDisabled(); // has sub-containers ⇒ Type locked
-    await expect(page.locator('#mm_kind button[data-k="sub"]')).toHaveClass(/on/); // …but still displays "sub" (UI doesn't lie about the nested state)
-    await page.locator("#mm_name").fill("Sub1 Renamed");
-    await page.locator("#mm_save").click();
+    await expect(page.locator("#nm_name")).toHaveValue("Sub1");
+    await expect(page.locator('#nm_type button[data-t="feature"]')).toBeDisabled(); // has children ⇒ Type locked
+    await page.locator("#nm_name").fill("Sub1 Renamed");
+    await page.locator("#nm_save").click();
     await expect(page.locator("#modalRoot")).toBeHidden();
 
     const doc = await readDoc(page);
     const renamed = docFindByName(doc, "Sub1 Renamed");
     expect(renamed).toBeTruthy();
     expect(docParentOf(doc, renamed.id).id).toBe("m-alpha"); // STILL under Alpha — not re-homed to root
-    expect(docParentOf(doc, docFindByName(doc, "Sub2").id).id).toBe(renamed.id); // Sub2 still under Sub1 (order/subtree intact)
+    expect(docParentOf(doc, docFindByName(doc, "Sub2").id).id).toBe(renamed.id); // Sub2 still under Sub1 (subtree intact)
     expect(await gridModNames(page)).toEqual(["Alpha", "Sub1 Renamed", "Sub2", "Beta", "Gamma"]); // order unchanged
-    await assertAligned(page, "F3 rename nested sub");
+    await assertAligned(page, "D8 rename nested sub");
   });
 });
 
@@ -406,8 +409,8 @@ test.describe("F5 — reveal-on-insert, cross-container drag, recursive rollups"
     await expect.poll(() => readDoc(page).then((d) => docFindNode(d, "m-gamma").collapsed)).toBe(true);
 
     const g = page.locator('#leftBody .modRow[data-nid="m-gamma"]');
-    await g.hover();
-    await g.locator('[data-act="addfeat"]').click(); // ＋ on the collapsed header opens the modal
+    await g.locator('.modGrip').hover();                         // D7: open the grip menu on the collapsed header
+    await g.locator('.gripPill [data-act="addfeat"]').click();   // ＋ opens the feature-create modal
     await expect(page.locator("#fm_name")).toBeVisible();
     await page.locator("#fm_name").fill("Gamma Fresh");
     await page.locator("#fm_save").click();
