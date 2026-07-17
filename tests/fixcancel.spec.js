@@ -29,7 +29,7 @@ test("FIX7(module): a pointercancel clears the drag guard and un-freezes backgro
 
   // Begin (but do NOT finish) a module drag: pointerdown on the grip latches the guard
   // (capture-phase) and creates the .modGhost; a small move keeps the drag live.
-  const grip = page.locator('#leftBody .modRow[data-mi="0"] .modGrip');
+  const grip = page.locator('#leftBody .modRow[data-nid="m-alpha"] .modGrip'); // v1.0.4: row addressed by container node id (SEED_A first module = "m-alpha")
   const gb = await grip.boundingBox();
   expect(gb, "module grip must be present").not.toBeNull();
   await page.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2);

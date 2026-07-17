@@ -106,7 +106,7 @@ async function collectRows(page) {
       const type = el.classList.contains("modRow") ? "mod"
         : el.classList.contains("featRow") ? "feat"
         : el.classList.contains("addFeat") ? "add" : "other";
-      return { type, top: +(r.top - lbTop).toFixed(2), height: +r.height.toFixed(2), mi: el.dataset.mi ?? null, fi: el.dataset.fi ?? null };
+      return { type, top: +(r.top - lbTop).toFixed(2), height: +r.height.toFixed(2), nid: el.dataset.nid ?? null };
     });
     const right = Array.from(rowsLayer.children).map((el) => {
       const r = el.getBoundingClientRect();

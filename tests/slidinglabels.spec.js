@@ -14,7 +14,7 @@
  * wide bar's END can be scrolled to the viewport-left edge (needed for the clamp case). */
 const { test, expect, openTimeline, mkDoc, mkMod, mkFeat, assertAligned } = require("./fixtures");
 
-// data-fi order = features[] order: 0 = wide slider, 1 = tiny (truncating) bar, 2 = spacer.
+// feature order = children order: f-slide = wide slider, f-tiny = tiny (truncating) bar, f-spacer = spacer.
 function SEED_SLIDE() {
   return mkDoc([
     mkMod("m-wide", "Wide Module", {
@@ -28,8 +28,9 @@ function SEED_SLIDE() {
   ]);
 }
 
-const WIDE = '.bar[data-mi="0"][data-fi="0"]';
-const TINY = '.bar[data-mi="0"][data-fi="1"]';
+// v1.0.4: bars are addressed by data-nid (feature node id). SEED_SLIDE feature ids: f-slide, f-tiny.
+const WIDE = '.bar[data-nid="f-slide"]';
+const TINY = '.bar[data-nid="f-tiny"]';
 
 // Set #rightScroll.scrollLeft, fire the real onscroll hook, and let the rAF-throttled
 // updateStickyLabels() settle (double-rAF). Returns the scrollLeft the browser accepted.

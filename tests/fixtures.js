@@ -159,14 +159,41 @@ async function gridModNames(page) {
 async function gridFeatNames(page) {
   return page.$$eval("#leftBody .featRow .cell.feat .txt", (els) => els.map((e) => e.textContent.trim()));
 }
-// data-mi of the modRow whose modName textContent EXACTLY equals `name`.
-async function miOf(page, name) {
+// v1.0.4: rows/bars are addressed by data-nid (node id), not data-mi/data-fi array indices.
+// nidOf returns the data-nid of the modRow whose modName textContent EXACTLY equals `name`.
+async function nidOf(page, name) {
   return page.evaluate((nm) => {
     const rows = [...document.querySelectorAll("#leftBody .modRow")];
     const r = rows.find((x) => x.querySelector(".modName").textContent === nm);
-    return r ? r.dataset.mi : null;
+    return r ? r.dataset.nid : null;
   }, name);
 }
+// data-nid of the featRow whose feature name (cell.feat .txt) EXACTLY equals `name`.
+async function featNid(page, name) {
+  return page.evaluate((nm) => {
+    const rows = [...document.querySelectorAll("#leftBody .featRow")];
+    const r = rows.find((x) => (x.querySelector(".cell.feat .txt").textContent || "").trim() === nm);
+    return r ? r.dataset.nid : null;
+  }, name);
+}
+/* ---- tree-doc read helpers (recursive; the doc is now a node tree) ---- */
+function docFindNode(doc, id) {
+  let hit = null;
+  (function rec(ns) { (ns || []).forEach((n) => { if (!n) return; if (n.id === id) hit = n; if (n.children) rec(n.children); }); })(docModules(doc));
+  return hit;
+}
+function docFindByName(doc, name) {
+  let hit = null;
+  (function rec(ns) { (ns || []).forEach((n) => { if (!n) return; if (n.name === name) hit = n; if (n.children) rec(n.children); }); })(docModules(doc));
+  return hit;
+}
+function docParentOf(doc, id) {
+  let par = null;
+  (function rec(ns, p) { (ns || []).forEach((n) => { if (!n) return; if (n.id === id) par = p; if (n.children) rec(n.children, n); }); })(docModules(doc), null);
+  return par;
+}
+function docCountFeatures(doc) { let n = 0; (function rec(ns) { (ns || []).forEach((x) => { if (!x) return; if (x.kind === "feature") n++; else if (x.children) rec(x.children); }); })(docModules(doc)); return n; }
+function docCountContainers(doc) { let n = 0; (function rec(ns) { (ns || []).forEach((x) => { if (!x) return; if (x.kind === "container") { n++; rec(x.children || []); } }); })(docModules(doc)); return n; }
 
 /* -------------------------- computed-style helpers ----------------------- */
 async function pseudo(page, selector, which) {
@@ -222,9 +249,9 @@ async function assertAligned(page, label = "") {
 /* ------------------------------- interactions ---------------------------- */
 // Hover the module row (reveals the opacity:0 .modActs cluster) then click an action.
 async function clickModAct(page, name, act) {
-  const mi = await miOf(page, name);
-  expect(mi, `module "${name}" not found`).not.toBeNull();
-  const row = page.locator(`#leftBody .modRow[data-mi="${mi}"]`);
+  const nid = await nidOf(page, name);
+  expect(nid, `module "${name}" not found`).not.toBeNull();
+  const row = page.locator(`#leftBody .modRow[data-nid="${nid}"]`);
   await row.hover();
   await row.locator(`[data-act="${act}"]`).click();
 }
@@ -233,12 +260,12 @@ async function clickModAct(page, name, act) {
 // document.elementFromPoint, so we must issue REAL mouse moves (page.mouse) with a
 // small kick-off move + a settling move so elementFromPoint stabilizes on the target.
 async function dragModule(page, srcName, tgtName, where /* 'before' | 'after' | 'onto' */) {
-  const smi = await miOf(page, srcName);
-  const tmi = await miOf(page, tgtName);
-  expect(smi, `drag source "${srcName}" not found`).not.toBeNull();
-  expect(tmi, `drag target "${tgtName}" not found`).not.toBeNull();
-  const grip = page.locator(`#leftBody .modRow[data-mi="${smi}"] .modGrip`);
-  const tgt = page.locator(`#leftBody .modRow[data-mi="${tmi}"]`);
+  const sNid = await nidOf(page, srcName);
+  const tNid = await nidOf(page, tgtName);
+  expect(sNid, `drag source "${srcName}" not found`).not.toBeNull();
+  expect(tNid, `drag target "${tgtName}" not found`).not.toBeNull();
+  const grip = page.locator(`#leftBody .modRow[data-nid="${sNid}"] .modGrip`);
+  const tgt = page.locator(`#leftBody .modRow[data-nid="${tNid}"]`);
   await grip.scrollIntoViewIfNeeded();
   const gb = await grip.boundingBox();
   await tgt.scrollIntoViewIfNeeded();
@@ -255,9 +282,10 @@ async function dragModule(page, srcName, tgtName, where /* 'before' | 'after' | 
 }
 
 // Pointer-drag a feature row by its grip to another feature row (regression guard).
-async function dragFeature(page, srcMi, srcFi, tgtMi, tgtFi, where /* 'before' | 'after' */) {
-  const grip = page.locator(`#leftBody .featRow[data-mi="${srcMi}"][data-fi="${srcFi}"] .grip[data-act="rowdrag"]`);
-  const tgt = page.locator(`#leftBody .featRow[data-mi="${tgtMi}"][data-fi="${tgtFi}"]`);
+// v1.0.4: features are addressed by data-nid (the feature's node id).
+async function dragFeature(page, srcNid, tgtNid, where /* 'before' | 'after' */) {
+  const grip = page.locator(`#leftBody .featRow[data-nid="${srcNid}"] .grip[data-act="rowdrag"]`);
+  const tgt = page.locator(`#leftBody .featRow[data-nid="${tgtNid}"]`);
   const gb = await grip.boundingBox();
   const tb = await tgt.boundingBox();
   const sx = gb.x + gb.width / 2, sy = gb.y + gb.height / 2;
@@ -290,7 +318,13 @@ module.exports = {
   docModById,
   gridModNames,
   gridFeatNames,
-  miOf,
+  nidOf,
+  featNid,
+  docFindNode,
+  docFindByName,
+  docParentOf,
+  docCountFeatures,
+  docCountContainers,
   pseudo,
   pxProp,
   alignmentSnapshot,

@@ -80,7 +80,8 @@ test("FIX3: a live drag sets the interaction guard so a storage adopt is deferre
   await gotoTimeline(page);
 
   // Begin (but do NOT finish) a feature-row drag: pointerdown on the grip, then move.
-  const gb = await boxOf(page, '.featRow[data-mi="0"][data-fi="0"] .grip');
+  // v1.0.4: rows addressed by data-nid (minimalDoc's first feature id = "fa1").
+  const gb = await boxOf(page, '.featRow[data-nid="fa1"] .grip');
   await page.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2);
   await page.mouse.down();
   await page.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2 + 24, { steps: 5 }); // enter rowDrag
@@ -101,7 +102,7 @@ test("FIX3: a live drag sets the interaction guard so a storage adopt is deferre
   // No mid-drag re-render: the original module row is still present and unchanged.
   // (An adopt would run route()->renderProject, resetting to the summary tab and
   //  destroying the grid, which would corrupt the in-flight drag.)
-  await expect(page.locator('.modRow[data-mi="0"] .modName')).toHaveText("Module A");
+  await expect(page.locator('.modRow[data-nid="mod-a"] .modName')).toHaveText("Module A");
   expect(await page.locator(".rowGhost").count()).toBeGreaterThan(0);
 
   await page.mouse.up(); // finish the drag cleanly
@@ -126,7 +127,7 @@ test("FIX4: a failed cloud push clears pushPending (no permanent adoption block)
 
   // A mutation schedules a push: pushPending flips true synchronously; cloudPush()
   // fires ~800ms later and fails because the fixture aborts the production host.
-  await page.click('.modRow[data-mi="0"] .caret[data-act="toggle"]');
+  await page.click('.modRow[data-nid="mod-a"] .caret[data-act="toggle"]');
   expect(await page.evaluate(() => window["cloudSyncState"]().pushPending)).toBe(true);
 
   // After the push fails, the latch must return to false (otherwise cloudPull
@@ -146,7 +147,7 @@ test("FIX5: a failed localStorage write shows a warning toast (not silent)", asy
   await page.evaluate(() => { localStorage.setItem = () => { throw new Error("QuotaExceeded"); }; });
 
   // A mutation -> Store.save() -> safeSet() returns false -> one-time warning toast.
-  await page.click('.modRow[data-mi="0"] .caret[data-act="toggle"]');
+  await page.click('.modRow[data-nid="mod-a"] .caret[data-act="toggle"]');
   await expect(page.locator("#toast")).toContainText("บันทึกลงเครื่องไม่สำเร็จ");
   await expect(page.locator("#toast")).toHaveClass(/show/);
 });

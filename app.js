@@ -110,9 +110,10 @@ const Store = {
     const raw = safeGet();
     if(raw){ try{ DB = JSON.parse(raw); }catch(e){ DB=null; } }
     if(!DB){ DB = MEM || seedDB(); }
+    migrateDB(DB);                                    // v1.0.4: flat modules+parentId → recursive node tree (idempotent, per project)
     MEM = DB; return DB;
   },
-  save(){ const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); } // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
+  save(){ writeMirror(DB); const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); } // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
 };
 function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
 
@@ -159,7 +160,7 @@ function editingNow(){
   if(el("historyOverlay") && el("historyOverlay").style.display==="flex") return true;
   return false;
 }
-function adoptRemote(doc, rev){ DB=doc; MEM=DB; safeSet(JSON.stringify(DB)); setLsRev(rev); route(); }
+function adoptRemote(doc, rev){ DB=doc; migrateDB(DB); MEM=DB; writeMirror(DB); safeSet(JSON.stringify(DB)); setLsRev(rev); route(); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent)
 async function cloudPull(force){
   if(!cloudOn()) return false;
   try{
@@ -277,15 +278,18 @@ function seedDB(){
 }
 
 /* =====================  PROGRESS MODEL  ===================== */
+/* §4 consistency — stats roll up recursively: a container's stats span EVERY
+   descendant feature (direct + nested sub-container features) via the shared
+   containerFeatures() walk, so create/move/delete can never disagree with display. */
 function moduleStats(m){
-  let total=m.features.length, done=0, started=0;
-  m.features.forEach(f=>{ if(f.status==="done") done++; else if(f.status!=="not_started") started++; });
+  const feats=containerFeatures(m); const total=feats.length; let done=0, started=0;
+  feats.forEach(f=>{ if(f.status==="done") done++; else if(f.status!=="not_started") started++; });
   const ns=total-done-started, pc=n=> total? Math.round(n/total*100):0;
   return {total, done, started, notStarted:ns, donePct:pc(done), startedPct:pc(started), notPct:pc(ns)};
 }
 function aggregateStats(mods){
   let total=0, done=0, started=0;
-  mods.forEach(m=> m.features.forEach(f=>{ total++; if(f.status==="done") done++; else if(f.status!=="not_started") started++; }));
+  mods.forEach(m=> containerFeatures(m).forEach(f=>{ total++; if(f.status==="done") done++; else if(f.status!=="not_started") started++; }));
   const ns=total-done-started, pc=n=> total? Math.round(n/total*100):0;
   return {total, done, started, notStarted:ns, donePct:pc(done), startedPct:pc(started), notPct:pc(ns)};
 }
@@ -344,12 +348,12 @@ function route(){
 
 /* =====================  DASHBOARD  ===================== */
 function renderDashboard(){
-  DB.projects.forEach(normalizeModules);
+  DB.projects.forEach(normalizeTree);
   const ps = DB.projects;
   const cards = ps.map(p=>{
     const pc = PALETTE[p.color%PALETTE.length];
     let mn=null, mx=null, nFeat=0;
-    p.modules.forEach(m=>m.features.forEach(f=>{ nFeat++; const s=parse(f.start),e=parse(f.end); if(!mn||s<mn)mn=s; if(!mx||e>mx)mx=e; }));
+    walkFeatures(p, f=>{ nFeat++; const s=parse(f.start),e=parse(f.end); if(!mn||s<mn)mn=s; if(!mx||e>mx)mx=e; }); // recursive: count every descendant feature + derive the date range
     const range = mn ? `${monName(mn.getMonth())} ${String(dispYear(mn)).slice(-2)} – ${monName(mx.getMonth())} ${String(dispYear(mx)).slice(-2)}` : "—";
     const cur = p.summary && p.summary.current;
     const vmods = progressModules(p);
@@ -438,7 +442,7 @@ function projectModal(id){
       const slug=(code||name).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")||("proj-"+_seq);
       let pid=slug, n=2; while(DB.projects.some(p=>p.id===pid)){ pid=slug+"-"+n; n++; }
       DB.projects.push({ id:pid, name, client, code, color, createdAt:iso(today()), updatedAt:iso(today()),
-        customCols:[], progressOrder:[], summary:{current:{id:nid(),date:iso(today()),text:""},history:[]}, modules:[] });
+        customCols:[], progressOrder:[], summary:{current:{id:nid(),date:iso(today()),text:""},history:[]}, modules:[], docVer:2 }); // v1.0.4: new projects are already tree-shaped
     }
     Store.save(); closeModal(); renderDashboard(); toast(editing?"บันทึกแล้ว":"สร้างโครงการแล้ว");
   };
@@ -656,10 +660,11 @@ function renderProgress(){
       <span class="kc kc-x"></span>
     </div>`;
     const rows=mods.map(m=>{
-      const s=moduleStats(m), k=kpiOf(m), st=kpiState(m,s), isSub=m.parentId!=null;
+      const s=moduleStats(m), k=kpiOf(m), st=kpiState(m,s);
       const tip=`เสร็จ ${s.donePct}% · กำลังทำ ${s.startedPct}% · ยังไม่เริ่ม ${s.notPct}% (${s.total} งาน)`;
+      // §4: progress lists TOP-LEVEL containers only (progressModules → root nodes); the v1.0.3 "↳" sub rows are gone.
       return `<div class="kpiRow progRow" data-mid="${m.id}">
-        <span class="kc kc-name"><span class="pgrip" data-act="progdrag" title="ลากเพื่อจัดลำดับการแสดงผล">${IC.grip}</span><span class="pmName" title="${esc(m.name)}">${isSub?'↳ ':''}${esc(m.name)}</span></span>
+        <span class="kc kc-name"><span class="pgrip" data-act="progdrag" title="ลากเพื่อจัดลำดับการแสดงผล">${IC.grip}</span><span class="pmName" title="${esc(m.name)}">${esc(m.name)}</span></span>
         <span class="kc kc-bar"><span class="pbar" title="${tip}">${barSeg(s)}</span><span class="kc-auto mono" title="${tip}">${s.donePct}%</span></span>
         <span class="kc kc-num"><input type="number" class="kpiNum" min="0" max="100" step="5" data-f="target" data-mid="${m.id}" value="${k.target==null?'':k.target}" placeholder="—"/></span>
         <span class="kc kc-num"><input type="number" class="kpiNum" min="0" max="100" step="5" data-f="actual" data-mid="${m.id}" value="${k.actual==null?'':k.actual}" placeholder="${s.donePct}"/></span>
@@ -778,48 +783,215 @@ const PX = { day:38, week:11, month:4.4 };
 const pxPerDay = () => PX[ui.zoom];
 function getRange(){
   let mn=null,mx=null;
-  proj().modules.forEach(m=>m.features.forEach(f=>{ const s=parse(f.start),e=parse(f.end); if(!mn||s<mn)mn=s; if(!mx||e>mx)mx=e; }));
+  walkFeatures(proj(), f=>{ const s=parse(f.start),e=parse(f.end); if(!mn||s<mn)mn=s; if(!mx||e>mx)mx=e; }); // recursive over the whole tree
   if(!mn){ const t=today(); return {start:startOfMonth(addDays(t,-15)), end:endOfMonth(addDays(t,45))}; }
   return { start:startOfMonth(addDays(mn,-3)), end:endOfMonth(addDays(mx,3)) };
 }
 function updateMeta(){
-  const P=proj(); if(!P) return; const nMod=P.modules.length, nFeat=P.modules.reduce((a,m)=>a+m.features.length,0), r=getRange();
+  const P=proj(); if(!P) return; let nFeat=0; walkFeatures(P, ()=>nFeat++); const nMod=P.modules.length, r=getRange(); // nMod = top-level containers; nFeat = every descendant feature
   const ml=el("metaLine"); if(ml) ml.textContent=`${esc(P.client||"")} · ${nMod} โมดูล · ${nFeat} ฟีเจอร์ · ${monName(r.start.getMonth())} ${dispYear(r.start)} – ${monName(r.end.getMonth())} ${dispYear(r.end)}`;
 }
 
-/* =====================  MODULE HIERARCHY (parentId model)  =====================
-   Additive, backward-compatible: module.parentId (string|null|undefined). Falsy ⇒
-   MAIN module; set ⇒ SUB-module of that main. Exactly one level deep (a sub can
-   never be a parent). normalizeModules() runs at the top of renderBoard()/render-
-   Dashboard() and after every module mutation, so `mi` array indices stay valid for
-   BOTH panes (they render from this same normalized array). */
-function normalizeModules(P){
-  if(!P || !Array.isArray(P.modules)) return P;
-  const mods=P.modules, ids=new Set(mods.map(m=>m.id));
-  const hadParent=new Set(mods.filter(m=>m.parentId!=null).map(m=>m.id)); // input snapshot: who is a sub
-  // (1) sanitize: parentId pointing to a missing id, to itself, or to a module that is itself a sub → promote to main
-  mods.forEach(m=>{ const pid=m.parentId; if(pid==null) return; if(!ids.has(pid)||pid===m.id||hadParent.has(pid)) m.parentId=null; });
-  // (2) stable block reorder: every main immediately followed by its own subs (mains keep order; subs keep order within a parent)
-  const out=[], used=new Set();
-  mods.forEach(m=>{ if(m.parentId!=null||used.has(m.id)) return; out.push(m); used.add(m.id);
-    mods.forEach(s=>{ if(s.parentId===m.id && !used.has(s.id)){ out.push(s); used.add(s.id); } }); });
-  mods.forEach(m=>{ if(!used.has(m.id)){ m.parentId=null; out.push(m); used.add(m.id); } }); // safety: strays become mains
-  P.modules=out; return P;
+/* =====================  RECURSIVE NODE TREE (v1.0.4)  =====================
+   The v1.0.3 flat `P.modules[] + parentId + features[]` model is replaced by ONE
+   recursive tree. Every node is a container or a feature:
+     container := { id, kind:'container', name, description, color, collapsed, children:[node], ...unknown }
+     feature   := { id, kind:'feature', name, description, fid, start, end, status, remark, custom:{}, ...unknown }
+   `P.modules` holds root CONTAINERS only. `P.docVer===2` is stamped by migration.
+   Every mutation flows through apply() (R2); rows/bars are addressed by data-nid (R1);
+   both panes render from a single flatten(P) (R9). */
+
+/* ---- MIGRATION (R-spec §2): v1 flat modules → recursive tree. Idempotent, one place. ---- */
+function migrateDB(DB){ if(DB && Array.isArray(DB.projects)) DB.projects.forEach(migrateDoc); return DB; }
+function v1FeatureToNode(f){
+  // Keep the existing (uid-minted) unique feature id as the node id; keep ALL unknown fields.
+  const n = Object.assign({}, f);
+  delete n.children;                                  // a v1 feature never has children
+  n.kind = "feature";
+  if(!n.id || typeof n.id!=="string") n.id = nid();   // mint only if missing (D5: features carry uid()-scheme nids)
+  if(!n.custom || typeof n.custom!=="object") n.custom = {};
+  return n;
 }
-/* index of the MAIN a module (main or sub) belongs to */
-function mainIndexOf(mods, idx){ const m=mods[idx]; if(!m||m.parentId==null) return idx; const pi=mods.findIndex(x=>x.id===m.parentId); return pi>=0?pi:idx; }
-/* [start,end) of the contiguous block = a MAIN plus its immediate subs (assumes normalized order) */
-function blockRange(mods, mainIdx){ const id=mods[mainIdx].id; let end=mainIdx+1; while(end<mods.length && mods[end].parentId===id) end++; return [mainIdx,end]; }
-/* order+parent signature — detects drop-in-place (no-op) module moves */
-function moduleOrderSig(mods){ return mods.map(m=>m.id+"~"+(m.parentId==null?"":m.parentId)).join("|"); }
+function v1ModuleToContainer(m, childrenNodes){
+  const n = Object.assign({}, m);
+  delete n.features; delete n.parentId;               // features → children; parentId is dissolved into the tree
+  n.kind = "container";
+  n.collapsed = !!m.collapsed;
+  n.children = childrenNodes;
+  if(!n.id || typeof n.id!=="string") n.id = nid();   // D5: containers keep their existing v1.0.3 module id (progressOrder stays valid)
+  return n;
+}
+function migrateDoc(P){
+  if(!P || typeof P!=="object") return P;
+  const mods = Array.isArray(P.modules)?P.modules:[];
+  // Already v2 (stamped) OR already tree-shaped (kind/children present, e.g. a new project or a
+  // stamp-less re-adopt): sanitize only. Re-running the v1 path here would drop `children`.
+  if(P.docVer>=2 || mods.some(m=> m && (m.kind==="container" || m.kind==="feature" || Array.isArray(m.children)))){
+    P.docVer=2; normalizeTree(P); return P;
+  }
+  // Sanitize parentId exactly like v1.0.3 normalizeModules step 1 (missing / self / sub-of-sub ⇒ treated as main).
+  const ids=new Set(mods.map(m=>m&&m.id)), hadParent=new Set(mods.filter(m=>m&&m.parentId!=null).map(m=>m.id));
+  const parentOf = m => { const pid=m.parentId; if(pid==null) return null; if(!ids.has(pid)||pid===m.id||hadParent.has(pid)) return null; return pid; };
+  const roots=[];
+  // Root modules keep display order; each root's features become feature children first, then
+  // its parentId-children become container children (after the parent's own features).
+  mods.forEach(m=>{ if(m && parentOf(m)===null) roots.push(m); });
+  const out = roots.map(root=>{
+    const featChildren = (Array.isArray(root.features)?root.features:[]).map(v1FeatureToNode);
+    const subChildren = mods.filter(s=> s && parentOf(s)===root.id)
+      .map(sub=> v1ModuleToContainer(sub, (Array.isArray(sub.features)?sub.features:[]).map(v1FeatureToNode)));
+    return v1ModuleToContainer(root, featChildren.concat(subChildren));
+  });
+  P.modules = out;
+  P.docVer = 2;                                         // stamp
+  normalizeTree(P);                                     // enforce invariants (unique ids etc.)
+  return P;
+}
+
+/* ---- NORMALIZE (R4): unique ids, kind sanity, root=containers, order-preserving single pass. ---- */
+function normalizeTree(P){
+  if(!P || typeof P!=="object") return P;
+  if(!Array.isArray(P.modules)) P.modules=[];
+  const seen=new Set();
+  function fix(node){
+    if(!node || typeof node!=="object") return;
+    if(!node.id || typeof node.id!=="string" || seen.has(node.id)) node.id=nid();  // dupes / missing → re-id
+    seen.add(node.id);
+    if(node.kind!=="feature" && node.kind!=="container"){
+      // F1: infer kind for a node lacking a valid one, in priority order (§2 transition compatibility):
+      //   1) children[] present     → container (mirror nodes carry BOTH children+features — children WIN; the features mirror is never authority)
+      //   2) else features[] present → v1-shape module injected by a still-open old tab: LIFT features[] → children (order preserved), consume the array
+      //   3) else                   → leaf feature (as before)
+      if(Array.isArray(node.children)) node.kind="container";
+      else if(Array.isArray(node.features)){ node.kind="container"; node.children=node.features.map(v1FeatureToNode); delete node.features; } // consume features ONLY on this lift path
+      else node.kind="feature";
+    }
+    if(node.kind==="feature"){
+      if(Array.isArray(node.children) && node.children.length){                     // feature with children ⇒ becomes a container
+        console.warn('normalizeTree: feature "'+(node.name||node.id)+'" had children — converting to container');
+        node.kind="container";
+      } else { if("children" in node) delete node.children; if(!node.custom||typeof node.custom!=="object") node.custom={}; }
+    }
+    if(node.kind==="container"){
+      if(!Array.isArray(node.children)) node.children=[];
+      node.collapsed=!!node.collapsed;
+      node.children.forEach(fix);
+    }
+  }
+  P.modules.forEach(fix);
+  // F1: ROOT re-homing — a root node still carrying parentId whose target resolves to an existing
+  // container ELSEWHERE in the tree is moved INTO that container's children (append) + parentId deleted;
+  // any remaining parentId anywhere is deleted (the field is dissolved in v2). Order-preserving, idempotent.
+  const contById=new Map(); walkTree(P.modules, n=>{ if(n && n.kind==="container") contById.set(n.id, n); });
+  const rootsAfter=[];
+  P.modules.forEach(node=>{
+    const pid=node.parentId;
+    if(pid!=null && pid!==node.id){
+      const tgt=contById.get(pid);
+      if(tgt && tgt!==node && !subtreeHas(node, tgt)){ delete node.parentId; tgt.children.push(node); return; } // re-homed → drops out of the root list (no cycle: tgt is not within node's own subtree)
+    }
+    if("parentId" in node) delete node.parentId;                              // root node with an unresolvable parentId → strip
+    rootsAfter.push(node);
+  });
+  P.modules=rootsAfter;
+  walkTree(P.modules, n=>{ if(n && "parentId" in n) delete n.parentId; });    // dissolve parentId anywhere else in the tree
+  // Root holds containers ONLY: a stray root feature is wrapped into a recovery container (never dropped).
+  const finalRoots=[]; let recovery=null;
+  P.modules.forEach(node=>{
+    if(node.kind==="container"){ finalRoots.push(node); }
+    else {
+      if(!recovery){ recovery={id:nid(),kind:"container",name:"(กู้คืน)",description:"",color:0,collapsed:false,children:[]}; seen.add(recovery.id); finalRoots.push(recovery); }
+      recovery.children.push(node);
+    }
+  });
+  P.modules=finalRoots;
+  return P;
+}
+
+/* ---- DUAL-WRITE MIRROR (spec §2.2 — REMOVE IN v1.0.5) --------------------------------
+   On save, every container also writes `features:[its DIRECT feature children]`. It is a
+   MIRROR only — ignored on load when docVer>=2 (we render from children). It lets a still-
+   open v1.0.3 tab that adopts a v2 doc render top-level modules + their direct features
+   instead of a blank board, while its own saves keep `children` intact (v1.0.3 preserves
+   unknown fields). Delete this whole helper + its Store.save()/adoptRemote() calls in v1.0.5. */
+function writeMirror(DB){
+  if(!DB || !Array.isArray(DB.projects)) return;
+  DB.projects.forEach(P=>{
+    if(!P || !Array.isArray(P.modules)) return;
+    (function rec(nodes){ nodes.forEach(n=>{ if(n && n.kind==="container"){ n.features=(n.children||[]).filter(c=>c && c.kind==="feature"); rec(n.children||[]); } }); })(P.modules);
+  });
+}
+
+/* ---- TREE WALK / ADDRESSING (R1) ---- */
+function walkTree(nodes, fn, parent){ (nodes||[]).forEach((n,i)=>{ fn(n,parent||null,i); if(n && n.kind==="container") walkTree(n.children||[], fn, n); }); }
+function subtreeHas(root, cand){ let f=false; walkTree([root], n=>{ if(n===cand) f=true; }); return f; } // true when cand is root itself or a descendant of root (cycle guard for re-homing)
+function findNode(P, id){ if(!P||id==null) return null; let hit=null; walkTree(P.modules, n=>{ if(n && n.id===id) hit=n; }); return hit; }
+function findParent(P, id){ if(!P||id==null) return null; let par=null, found=false; walkTree(P.modules, (n,parent)=>{ if(n && n.id===id){ par=parent; found=true; } }); return found?par:null; } // null parent ⇒ node is a root
+function siblingsOf(P, id){ const par=findParent(P,id); return par ? par.children : P.modules; }
+function walkFeatures(P, fn){ if(!P) return; (function rec(nodes){ (nodes||[]).forEach(n=>{ if(!n) return; if(n.kind==="feature") fn(n); else if(n.kind==="container") rec(n.children||[]); }); })(P.modules||[]); }
+function containerFeatures(node){ const out=[]; if(!node) return out; (function rec(n){ (n.children||[]).forEach(c=>{ if(!c) return; if(c.kind==="feature") out.push(c); else if(c.kind==="container") rec(c); }); })(node); return out; } // every DESCENDANT feature
+function directFeatures(node){ return node && Array.isArray(node.children) ? node.children.filter(c=>c && c.kind==="feature") : []; }
+function countAll(node){ let n=0; if(node && node.kind==="container") walkTree(node.children||[], ()=>{ n++; }); return n; } // descendant node count (containers + features), for the cascade-delete confirm
+function removeNode(P, id){ const par=siblingsOf(P,id); const i=par.findIndex(n=>n && n.id===id); if(i>=0){ const [g]=par.splice(i,1); return g; } return null; }
+function revealInto(container){ if(container && container.kind==="container") container.collapsed=false; } // R6: inserting INTO a container auto-expands it
+
+/* ---- SINGLE MUTATION GATE (R2) ----
+   mutator(P) → normalizeTree(P) → Store.save() → renderBoard(). Returns the mutator's
+   focus/flash descriptor (a nid) if it provides one. EVERY tree create/move/edit/delete
+   goes through here — no direct Store.save() in ported tree paths. */
+function apply(mutator, opts){
+  const P=proj(); if(!P) return null;
+  const r = mutator ? mutator(P) : null;
+  normalizeTree(P);
+  Store.save();
+  if(opts && opts.fields && el("leftBody") && el("rowsLayer")){ // F2: non-structural FIELD edit → LIGHT render. Keep #leftBody (the focused editor + its listeners survive); refresh chart + meta + progress only.
+    renderTimeline();                                  // recomputes flatten; runs applyWrap()/syncRowHeights() (reads the live grid) + updateStickyLabels()
+    updateMeta();
+    if(el("progressPanel")) renderProgress();
+  } else {
+    renderBoard();                                     // structural mutation (create/move/delete/promote/…) → full rebuild
+  }
+  if(r && r.focus) focusNode(r.focus);                 // focus a freshly-created feature's name cell
+  return r || null;
+}
+function focusNode(id){
+  const row = el("leftBody") && el("leftBody").querySelector('.featRow[data-nid="'+cssEsc(id)+'"]');
+  if(row){ const tx=row.querySelector('.cell.feat .txt'); if(tx){ tx.focus(); if(window.getSelection){ const s=window.getSelection(); const rg=document.createRange(); rg.selectNodeContents(tx); rg.collapse(false); s.removeAllRanges(); s.addRange(rg); } } }
+}
+function cssEsc(s){ return String(s).replace(/["\\]/g,"\\$&"); }
+
+/* ---- FLATTEN (R9): ONE visible-row list feeds BOTH panes. Row kinds:
+   'container' (46px modRow/modBarRow) · 'feature' (42px featRow/barRow) · 'add' (32px addFeat/spacer).
+   depth = tree depth (root containers 0). lastChild = node is the last child of a non-root parent. ---- */
+function flatten(P){
+  const rows=[];
+  (function rec(nodes, depth, parent){
+    (nodes||[]).forEach((n,idx)=>{
+      if(!n) return;
+      const lastChild = !!parent && idx===nodes.length-1;
+      if(n.kind==="feature"){ rows.push({type:"feature", node:n, depth, parent, lastChild}); }
+      else {
+        rows.push({type:"container", node:n, depth, parent, lastChild});
+        if(!n.collapsed){ rec(n.children||[], depth+1, n); rows.push({type:"add", node:n, depth, parent, lastChild}); }
+      }
+    });
+  })(P.modules||[], 0, null);
+  return rows;
+}
 
 /* =====================  RENDER BOARD  ===================== */
 function renderBoard(){
-  const P=proj(); if(P) normalizeModules(P); renderGrid(); renderTimeline(); updateMeta(); if(el("progressPanel")) renderProgress();
+  const P=proj(); if(!P) return;
+  normalizeTree(P);
+  if(!el("leftBody")){ if(el("progressPanel")) renderProgress(); updateMeta(); return; } // not on the timeline tab → refresh panels only
+  const rows=flatten(P);                                // R9: compute the visible-row list ONCE, feed BOTH panes
+  renderGrid(rows); renderTimeline(rows); updateMeta();
+  if(el("progressPanel")) renderProgress();
 }
 
-function renderGrid(){
+function renderGrid(rows){
   const P=proj(), cols=allCols();
+  rows = rows || flatten(P);
   el("leftHead").innerHTML = cols.map(c=>{
     const wrapBtn = c.key==="description" ? `<button class="colTool wrapToggle ${ui.wrapTxt?'on':''}" data-act="wraptoggle" data-tip="ตัดข้อความ (Wrap) — คลิกเพื่อสลับ">${IC.wrap}</button>` : "";
     const delBtn = c.del ? `<button class="delcol" data-act="delcol" data-col="${c.custom}" title="ลบคอลัมน์">${IC.x}</button>` : "";
@@ -827,17 +999,19 @@ function renderGrid(){
   }).join("");
   const gw = cols.reduce((a,c)=>a+c.w,0);
   let html="";
-  P.modules.forEach((m,mi)=>{
-    const p=PALETTE[m.color%PALETTE.length];
-    const isSub=m.parentId!=null, nxt=P.modules[mi+1];
-    const lastSub=isSub && (!nxt || nxt.parentId!==m.parentId);   // last sub of its parent → its block holds the rail terminus (subEnd)
-    const modCls="modRow"+(m.collapsed?" collapsed":"")+(isSub?" subMod":"")+((lastSub&&m.collapsed)?" subEnd":""); // collapsed last sub → modRow itself is the terminus
-    html += `<div class="${modCls}" style="width:${gw}px" data-mi="${mi}">
+  rows.forEach(row=>{
+    const n=row.node, depth=row.depth;
+    if(row.type==="container"){
+      const p=PALETTE[(n.color||0)%PALETTE.length];
+      const isSub=depth>=1;                                             // any depth ≥1 is a "sub-module" visually
+      const subEndCls=(isSub && row.lastChild && n.collapsed)?" subEnd":""; // collapsed last child → its modRow is the rail terminus
+      const modCls="modRow"+(n.collapsed?" collapsed":"")+(isSub?" subMod":"")+subEndCls;
+      html += `<div class="${modCls}" style="width:${gw}px;--lvl:${depth}" data-nid="${esc(n.id)}">
       <span class="modGrip" data-act="moddrag" title="ลากเพื่อย้ายโมดูล">${IC.grip}</span>
       <span class="caret" data-act="toggle">${IC.caret}</span>
       <span class="chip" style="background:${p.chip}"></span>
-      <span class="modText"><span class="modName" contenteditable="true" data-field="modname" spellcheck="false">${esc(m.name)}</span>${m.description?`<span class="modDesc" data-tip="${esc(m.description)}">${esc(m.description)}</span>`:""}</span>
-      <span class="count">${m.features.length}</span>
+      <span class="modText"><span class="modName" contenteditable="true" data-field="modname" spellcheck="false">${esc(n.name)}</span>${n.description?`<span class="modDesc" data-tip="${esc(n.description)}">${esc(n.description)}</span>`:""}</span>
+      <span class="count">${containerFeatures(n).length}</span>
       <span class="modActs">
         <button class="iconbtn" data-act="modup" title="เลื่อนโมดูลขึ้น">${IC.up}</button>
         <button class="iconbtn" data-act="moddown" title="เลื่อนโมดูลลง">${IC.down}</button>
@@ -845,38 +1019,40 @@ function renderGrid(){
         <button class="iconbtn" data-act="addfeat" title="เพิ่มฟีเจอร์">${IC.plus}</button>
         <button class="iconbtn danger" data-act="delmod" title="ลบโมดูล">${IC.trash}</button>
       </span></div>`;
-    if(!m.collapsed){
-      m.features.forEach((f,fi)=>{
-        html += `<div class="featRow${isSub?' subScope':''}" data-mi="${mi}" data-fi="${fi}">`;
-        cols.forEach(c=>{
-          if(c.kind==="feat"){
-            html += `<div class="cell feat" style="width:${c.w}px">
+    } else if(row.type==="feature"){
+      const f=n, isSub=depth>=2;                                        // feature under a sub-container (depth ≥2) → subScope
+      html += `<div class="featRow${isSub?' subScope':''}" style="--lvl:${depth}" data-nid="${esc(f.id)}">`;
+      cols.forEach(c=>{
+        if(c.kind==="feat"){
+          html += `<div class="cell feat" style="width:${c.w}px">
               <span class="grip" data-act="rowdrag" title="ลากเพื่อย้ายแถว">${IC.grip}</span>
               <span class="txt" contenteditable="true" data-field="name" spellcheck="false" data-ph="ตั้งชื่อฟีเจอร์…">${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}${esc(f.name)}</span>
               <span class="rowActs"><button class="iconbtn" data-act="up" title="เลื่อนขึ้น">${IC.up}</button><button class="iconbtn" data-act="down" title="เลื่อนลง">${IC.down}</button><button class="iconbtn danger" data-act="delfeat" title="ลบฟีเจอร์">${IC.trash}</button></span></div>`;
-          } else if(c.kind==="date"){
-            const dval=c.custom?(f.custom[c.custom]||""):(f[c.key]||"");
-            html += `<div class="cell" style="width:${c.w}px"><input type="date" value="${esc(dval)}" data-mi="${mi}" data-fi="${fi}" data-field="${c.key}" /></div>`;
-          } else if(c.kind==="status"){
-            const st=stById(f.status);
-            const opts=STATUS.map(s=>`<option value="${s.id}" ${s.id===f.status?'selected':''}>${s.th}</option>`).join("");
-            html += `<div class="cell" style="width:${c.w}px"><select class="statusSel" data-mi="${mi}" data-fi="${fi}" data-field="status" style="box-shadow:inset 4px 0 0 ${st.color}">${opts}</select></div>`;
-          } else {
-            const val=c.custom?(f.custom[c.custom]||""):(f[c.key]||"");
-            html += `<div class="cell" style="width:${c.w}px"><span class="txt" contenteditable="true" data-field="${c.key}" spellcheck="false" data-ph="${esc(c.ph||"…")}">${esc(val)}</span></div>`;
-          }
-        });
-        html += `</div>`;
+        } else if(c.kind==="date"){
+          const dval=c.custom?((f.custom&&f.custom[c.custom])||""):(f[c.key]||"");
+          html += `<div class="cell" style="width:${c.w}px"><input type="date" value="${esc(dval)}" data-nid="${esc(f.id)}" data-field="${c.key}" /></div>`;
+        } else if(c.kind==="status"){
+          const st=stById(f.status);
+          const opts=STATUS.map(s=>`<option value="${s.id}" ${s.id===f.status?'selected':''}>${s.th}</option>`).join("");
+          html += `<div class="cell" style="width:${c.w}px"><select class="statusSel" data-nid="${esc(f.id)}" data-field="status" style="box-shadow:inset 4px 0 0 ${st.color}">${opts}</select></div>`;
+        } else {
+          const val=c.custom?((f.custom&&f.custom[c.custom])||""):(f[c.key]||"");
+          html += `<div class="cell" style="width:${c.w}px"><span class="txt" contenteditable="true" data-field="${c.key}" spellcheck="false" data-ph="${esc(c.ph||"…")}">${esc(val)}</span></div>`;
+        }
       });
-      html += `<div class="addFeat${isSub?' subScope':''}${lastSub?' subEnd':''}" data-mi="${mi}" data-act="addfeat">${IC.plus}<span>เพิ่มฟีเจอร์ในโมดูลนี้</span></div>`;
+      html += `</div>`;
+    } else { // add-feature zone for this container (one per non-collapsed container, at any depth)
+      const isSub=depth>=1, subEndCls=(isSub && row.lastChild)?" subEnd":"";
+      html += `<div class="addFeat${isSub?' subScope':''}${subEndCls}" style="--lvl:${depth+1}" data-nid="${esc(n.id)}" data-act="addfeat">${IC.plus}<span>เพิ่มฟีเจอร์ในโมดูลนี้</span></div>`;
     }
   });
   el("leftBody").innerHTML = html;
   bindGrid();
 }
 
-function renderTimeline(){
+function renderTimeline(rows){
   const P=proj(), r=getRange(), ppd=pxPerDay();
+  rows = rows || flatten(P);                            // R9: reuse renderBoard's flatten, or recompute for standalone calls
   const totalDays=daysBetween(r.start,r.end)+1, W=totalDays*ppd;
   let months="", cur=new Date(r.start);
   while(cur<=r.end){
@@ -901,24 +1077,26 @@ function renderTimeline(){
   if(t>=r.start&&t<=r.end){ const x=daysBetween(r.start,t)*ppd+ppd/2; grid+=`<div id="todayLine" style="left:${x}px"></div><div id="todayFlag" style="left:${x}px">วันนี้ ${fmtThai(t)}</div>`; }
   el("gridLayer").style.width=W+"px"; el("gridLayer").innerHTML=grid;
 
-  let rows="", altCount=0;
-  P.modules.forEach((m,mi)=>{
-    const p=PALETTE[m.color%PALETTE.length];
-    let ms=null,me=null; m.features.forEach(f=>{ const s=parse(f.start),e=parse(f.end); if(!ms||s<ms)ms=s; if(!me||e>me)me=e; });
-    let modBar="";
-    if(ms){ const left=daysBetween(r.start,ms)*ppd, w=(daysBetween(ms,me)+1)*ppd; modBar=`<div class="modBar" style="left:${left}px;width:${w}px"><div class="cap l" style="background:${p.border}"></div><div class="span" style="background:${p.border}"></div><div class="cap r" style="background:${p.border}"></div></div>`; }
-    rows += `<div class="modBarRow" style="width:${W}px">${modBar}</div>`;
-    if(!m.collapsed){
-      m.features.forEach((f,fi)=>{
-        const left=daysBetween(r.start,f.start)*ppd, w=Math.max(ppd,(daysBetween(f.start,f.end)+1)*ppd);
-        const alt=(altCount++ %2)===1?"alt":""; const dur=daysBetween(f.start,f.end)+1; const st=stById(f.status);
-        const tip=`${f.fid?f.fid+" · ":""}${f.name}\n${fmtThai(parse(f.start))} → ${fmtThai(parse(f.end))} (${dur} วัน)\nสถานะ: ${st.th}${f.remark?"\nหมายเหตุ: "+f.remark:""}`;
-        rows += `<div class="barRow ${alt}" style="width:${W}px"><div class="bar" data-mi="${mi}" data-fi="${fi}" data-tip="${esc(tip)}" style="left:${left+1}px;width:${w-2}px;background:${p.fill};border-color:${p.border};color:${p.ink}"><div class="handle l" data-mode="l"></div><span class="sdot" style="background:${st.color}"></span><span class="blabel">${esc(f.name)}</span><div class="handle r" data-mode="r"></div></div></div>`;
-      });
-      rows += `<div class="barRow" style="width:${W}px;height:32px;border-bottom:1px solid var(--line)"></div>`;
+  let rowsHtml="", altCount=0;
+  rows.forEach(row=>{
+    const n=row.node;
+    if(row.type==="container"){
+      const p=PALETTE[(n.color||0)%PALETTE.length];
+      let ms=null,me=null; containerFeatures(n).forEach(f=>{ const s=parse(f.start),e=parse(f.end); if(!ms||s<ms)ms=s; if(!me||e>me)me=e; }); // R7: span derives from ALL descendant features; empty container ⇒ no bar
+      let modBar="";
+      if(ms){ const left=daysBetween(r.start,ms)*ppd, w=(daysBetween(ms,me)+1)*ppd; modBar=`<div class="modBar" style="left:${left}px;width:${w}px"><div class="cap l" style="background:${p.border}"></div><div class="span" style="background:${p.border}"></div><div class="cap r" style="background:${p.border}"></div></div>`; }
+      rowsHtml += `<div class="modBarRow" style="width:${W}px" data-nid="${esc(n.id)}">${modBar}</div>`;
+    } else if(row.type==="feature"){
+      const f=n, pc=PALETTE[((row.parent&&row.parent.color)||0)%PALETTE.length]; // bar colour = parent container's palette (as v1.0.3)
+      const left=daysBetween(r.start,f.start)*ppd, w=Math.max(ppd,(daysBetween(f.start,f.end)+1)*ppd);
+      const alt=(altCount++ %2)===1?"alt":""; const dur=daysBetween(f.start,f.end)+1; const st=stById(f.status);
+      const tip=`${f.fid?f.fid+" · ":""}${f.name}\n${fmtThai(parse(f.start))} → ${fmtThai(parse(f.end))} (${dur} วัน)\nสถานะ: ${st.th}${f.remark?"\nหมายเหตุ: "+f.remark:""}`;
+      rowsHtml += `<div class="barRow ${alt}" style="width:${W}px"><div class="bar" data-nid="${esc(f.id)}" data-tip="${esc(tip)}" style="left:${left+1}px;width:${w-2}px;background:${pc.fill};border-color:${pc.border};color:${pc.ink}"><div class="handle l" data-mode="l"></div><span class="sdot" style="background:${st.color}"></span><span class="blabel">${esc(f.name)}</span><div class="handle r" data-mode="r"></div></div></div>`;
+    } else { // add-zone → 32px spacer aligned with the left addFeat row (keeps the panes 1:1)
+      rowsHtml += `<div class="barRow" style="width:${W}px;height:32px;border-bottom:1px solid var(--line)"></div>`;
     }
   });
-  el("rowsLayer").style.width=W+"px"; el("rowsLayer").innerHTML=rows;
+  el("rowsLayer").style.width=W+"px"; el("rowsLayer").innerHTML=rowsHtml;
   el("bars").style.width=W+"px";
   el("empty").style.display=P.modules.length?"none":"flex";
   bindBars();
@@ -936,7 +1114,7 @@ function syncRowHeights(){
   const rl=el("rowsLayer"), lb=el("leftBody"); if(!rl||!lb) return;
   const on = !!ui.wrapTxt;
   lb.querySelectorAll('.featRow').forEach(fr=>{
-    const bar = rl.querySelector(`.bar[data-mi="${fr.dataset.mi}"][data-fi="${fr.dataset.fi}"]`);
+    const bar = rl.querySelector('.bar[data-nid="'+cssEsc(fr.dataset.nid)+'"]');
     if(!bar) return;
     const barRow = bar.closest('.barRow'); if(!barRow) return;
     if(on){
@@ -1068,66 +1246,80 @@ function bindGrid(){
   lh.querySelectorAll('.wrapToggle').forEach(b=>{ b.addEventListener('pointerdown', e=>e.stopPropagation()); b.addEventListener('click', onWrapToggle); });
 }
 function onTextBlur(e){
-  const x=e.target, field=x.dataset.field, P=proj();
-  if(field==="modname"){ const mi=+x.closest('.modRow').dataset.mi; P.modules[mi].name=x.textContent.trim(); Store.save(); updateMeta(); return; }
+  const x=e.target, field=x.dataset.field;
+  if(field==="modname"){                                             // R1: resolve container via findNode(data-nid)
+    const id=x.closest('.modRow').dataset.nid, val=x.textContent.trim();
+    const n=findNode(proj(), id); if(!n || n.name===val) return;     // F2: dirty-check — unchanged ⇒ no save/render (DOM identity preserved)
+    apply(P=>{ const t=findNode(P,id); if(t) t.name=val; }, {fields:true}); // container name affects meta/progress/export only; grid cell already shows the text → light render
+    return;
+  }
   const row=x.closest('.featRow'); if(!row) return;
-  const f=P.modules[+row.dataset.mi].features[+row.dataset.fi];
-  let val=x.textContent;
-  if(field==="name"){ if(f.fid&&val.startsWith(f.fid)) val=val.slice(f.fid.length); f.name=val.trim(); const bl=el("rowsLayer").querySelector(`.bar[data-mi="${row.dataset.mi}"][data-fi="${row.dataset.fi}"] .blabel`); if(bl) bl.textContent=f.name; }
-  else if(field.startsWith("c:")){ f.custom[field.slice(2)]=val.trim(); }
-  else f[field]=val.trim();
-  Store.save();
+  const id=row.dataset.nid; const f0=findNode(proj(), id); if(!f0) return;
+  let val=x.textContent, key, newVal, curVal;
+  if(field==="name"){ if(f0.fid && val.startsWith(f0.fid)) val=val.slice(f0.fid.length); key="name"; newVal=val.trim(); curVal=f0.name||""; }
+  else if(field.startsWith("c:")){ key=field.slice(2); newVal=val.trim(); curVal=(f0.custom&&f0.custom[key])||""; }
+  else { key=field; newVal=val.trim(); curVal=f0[field]||""; }
+  if(newVal===(curVal||"")) return;                                  // F2: dirty-check — unchanged ⇒ no apply (no save, no render)
+  apply(P=>{ const f=findNode(P,id); if(!f) return;
+    if(field==="name") f.name=newVal;
+    else if(field.startsWith("c:")){ if(!f.custom) f.custom={}; f.custom[key]=newVal; }
+    else f[field]=newVal;
+  }, {fields:true});                                                 // FIELD edit: renderTimeline refreshes the .blabel; #leftBody untouched
 }
 function onDateChange(e){
-  const inp=e.target, P=proj(), f=P.modules[+inp.dataset.mi].features[+inp.dataset.fi], field=inp.dataset.field, v=inp.value;
-  if(field.startsWith("c:")){ const cid=field.slice(2); if(!v){ inp.value=f.custom[cid]||""; return; } f.custom[cid]=v; Store.save(); return; } // custom date column → store on f.custom, independent of the feature's schedule
-  if(!v){ inp.value=f[field]; return; }
-  if(field==="start"){ f.start=v; if(parse(f.end)<parse(v)) f.end=v; } else { f.end=v; if(parse(v)<parse(f.start)) f.start=v; }
-  Store.save(); renderTimeline();
+  const inp=e.target, id=inp.dataset.nid, field=inp.dataset.field, v=inp.value;
+  const f=findNode(proj(), id); if(!f) return;
+  if(field.startsWith("c:")){ const cid=field.slice(2); if(!v){ inp.value=(f.custom&&f.custom[cid])||""; return; } apply(P=>{ const t=findNode(P,id); if(t){ if(!t.custom) t.custom={}; t.custom[cid]=v; } }, {fields:true}); return; } // custom date column → store on f.custom, independent of the feature's schedule
+  if(!v){ inp.value=f[field]||""; return; }                            // empty ⇒ revert (no mutation)
+  apply(P=>{ const t=findNode(P,id); if(!t) return; if(field==="start"){ t.start=v; if(parse(t.end)<parse(v)) t.end=v; } else { t.end=v; if(parse(v)<parse(t.start)) t.start=v; } }, {fields:true});
+  // F2: the grid is NOT rebuilt on a field edit → manually reconcile the paired schedule input if the clamp moved it (v1.0.3 patch)
+  const f2=findNode(proj(), id), row=inp.closest('.featRow'); if(!f2 || !row) return;
+  const si=row.querySelector('input[data-field="start"]'), ei=row.querySelector('input[data-field="end"]');
+  if(si && si.value!==f2.start) si.value=f2.start; if(ei && ei.value!==f2.end) ei.value=f2.end;
 }
 function onStatusChange(e){
-  const s=e.target, P=proj(), f=P.modules[+s.dataset.mi].features[+s.dataset.fi];
-  f.status=s.value; const st=stById(f.status); s.style.boxShadow="inset 4px 0 0 "+st.color; Store.save();
-  const dot=el("rowsLayer").querySelector(`.bar[data-mi="${s.dataset.mi}"][data-fi="${s.dataset.fi}"] .sdot`); if(dot) dot.style.background=st.color;
-  renderProgress();
+  const s=e.target, id=s.dataset.nid;
+  apply(P=>{ const f=findNode(P,id); if(f) f.status=s.value; }, {fields:true}); // FIELD edit: renderTimeline refreshes the bar .sdot + progress roll-up
+  const st=stById(s.value); if(st) s.style.boxShadow="inset 4px 0 0 "+st.color;  // F2: grid not rebuilt → patch the select's status colour inline (v1.0.3 style)
 }
 function onGridAction(e){
   const b=e.currentTarget, act=b.dataset.act, P=proj();
-  if(act==="delcol"){ const cid=b.dataset.col; if(confirm("ลบคอลัมน์นี้และข้อมูลในคอลัมน์?")){ P.customCols=P.customCols.filter(c=>c.id!==cid); P.modules.forEach(m=>m.features.forEach(f=>{ delete f.custom[cid]; })); Store.save(); renderBoard(); } return; }
-  if(act==="addfeat"){ const mEl=b.closest('.modRow'); const mi=(b.dataset.mi!=null)?+b.dataset.mi:(mEl?+mEl.dataset.mi:-1); if(mi>=0) featureModal(mi); return; }
+  if(act==="delcol"){ const cid=b.dataset.col; if(confirm("ลบคอลัมน์นี้และข้อมูลในคอลัมน์?")){ apply(P2=>{ P2.customCols=(P2.customCols||[]).filter(c=>c.id!==cid); walkFeatures(P2, f=>{ if(f.custom) delete f.custom[cid]; }); }); } return; }
+  if(act==="addfeat"){ const host=b.closest('.modRow')||b.closest('.addFeat'); const cid=(host?host.dataset.nid:null)||b.dataset.nid; if(cid) featureModal(cid); return; } // R3: opens the modal pre-targeted; nothing is inserted until save
   const modEl=b.closest('.modRow');
   if(modEl && (act==="toggle"||act==="delmod"||act==="editmod"||act==="modup"||act==="moddown")){
-    const mi=+modEl.dataset.mi;
-    if(act==="toggle"){ P.modules[mi].collapsed=!P.modules[mi].collapsed; Store.save(); renderBoard(); return; }
-    if(act==="editmod"){ moduleModal(mi); return; }
-    if(act==="modup"){ moveModuleUpDown(mi,-1); return; }
-    if(act==="moddown"){ moveModuleUpDown(mi,1); return; }
-    if(act==="delmod"){
-      const target=P.modules[mi]; if(!target) return;
-      const subs=P.modules.filter(x=>x.parentId===target.id);                  // only a MAIN can have subs (one level deep)
-      const msg=subs.length ? `ลบโมดูล “${target.name}” และฟีเจอร์ทั้งหมด? โมดูลย่อยจะถูกเลื่อนขั้นเป็นโมดูลหลัก`
-                            : `ลบโมดูล “${target.name}” และฟีเจอร์ทั้งหมด?`;
-      if(confirm(msg)){ subs.forEach(s=>{ s.parentId=null; }); P.modules=P.modules.filter(x=>x!==target); normalizeModules(P); Store.save(); renderBoard(); }
+    const id=modEl.dataset.nid;
+    if(act==="toggle"){ apply(P2=>{ const n=findNode(P2,id); if(n) n.collapsed=!n.collapsed; }); return; }
+    if(act==="editmod"){ moduleModal(id); return; }
+    if(act==="modup"){ moveNodeUpDown(id,-1); return; }
+    if(act==="moddown"){ moveNodeUpDown(id,1); return; }
+    if(act==="delmod"){                                                        // D1: cascade delete (no silent child-promotion)
+      const node=findNode(P,id); if(!node) return;
+      const n=countAll(node), msg = n>0 ? `ลบ "${node.name}" และ ${n} รายการข้างใน?` : `ลบ "${node.name}"?`;
+      if(confirm(msg)) apply(P2=>{ removeNode(P2,id); });
       return;
     }
   }
   const featEl=b.closest('.featRow'); if(!featEl) return;
-  const mi=+featEl.dataset.mi, fi=+featEl.dataset.fi, feats=P.modules[mi].features;
-  if(act==="delfeat"){ if(confirm(`ลบฟีเจอร์ “${feats[fi].name}”?`)){ feats.splice(fi,1); Store.save(); renderBoard(); } }
-  else if(act==="up"&&fi>0){ [feats[fi-1],feats[fi]]=[feats[fi],feats[fi-1]]; Store.save(); renderBoard(); }
-  else if(act==="down"&&fi<feats.length-1){ [feats[fi+1],feats[fi]]=[feats[fi],feats[fi+1]]; Store.save(); renderBoard(); }
+  const id=featEl.dataset.nid;
+  if(act==="delfeat"){ const f=findNode(P,id); if(!f) return; if(confirm(`ลบ "${f.name}"?`)) apply(P2=>{ removeNode(P2,id); }); } // a feature has no descendants → plain confirm (N=0)
+  else if(act==="up"){ moveNodeUpDown(id,-1); }
+  else if(act==="down"){ moveNodeUpDown(id,1); }
 }
-function addFeature(mi){
-  const P=proj(), t=today();
-  P.modules[mi].features.push({id:nid(),fid:"",name:"ฟีเจอร์ใหม่",description:"",start:iso(t),end:iso(addDays(t,7)),status:"not_started",remark:"",custom:{}});
-  P.modules[mi].collapsed=false; Store.save(); renderBoard();
-  const rows=el("leftBody").querySelectorAll(`.featRow[data-mi="${mi}"]`); const last=rows[rows.length-1]; if(last){ const tx=last.querySelector('.txt'); tx&&tx.focus(); }
+/* up/down: swap a node with its adjacent SIBLING inside its parent's children (or the root
+   list). Unifies feature reorder AND module reorder-among-siblings (§4). Boundary ⇒ no-op. */
+function moveNodeUpDown(id, dir){
+  const sibs=siblingsOf(proj(), id); const i=sibs.findIndex(n=>n&&n.id===id);
+  if(i<0) return; const j=i+dir; if(j<0||j>=sibs.length) return;              // at an edge → no save/render
+  apply(P=>{ const sb=siblingsOf(P,id); const a=sb.findIndex(n=>n&&n.id===id), b2=a+dir; if(a<0||b2<0||b2>=sb.length) return; const t=sb[a]; sb[a]=sb[b2]; sb[b2]=t; });
 }
 
-/* feature modal — fill in details when adding (or editing) a feature */
-function featureModal(mi, fi){
-  const P=proj(), M=P.modules[mi]; if(!M) return;
-  const editing=(fi!=null)?M.features[fi]:null, t=today();
+/* feature modal — fill in details when adding (or editing) a feature.
+   R3: creation happens ON SAVE ONLY — the grip/＋ opens this pre-targeted at a container
+   (containerId); nothing is inserted until the user saves. */
+function featureModal(containerId, featId){
+  const P=proj(), M=findNode(P,containerId); if(!M || M.kind!=="container") return;
+  const editing=(featId!=null)?findNode(P,featId):null, t=today();
   const f = editing || {fid:"",name:"",description:"",start:iso(t),end:iso(addDays(t,7)),status:"not_started",remark:""};
   const opts=STATUS.map(s=>`<option value="${s.id}" ${s.id===f.status?'selected':''}>${esc(s.th)}</option>`).join("");
   openModal(`
@@ -1150,39 +1342,45 @@ function featureModal(mi, fi){
     const name=el("fm_name").value.trim()||"ฟีเจอร์ใหม่";
     let s=el("fm_start").value||iso(t), e=el("fm_end").value||s; if(parse(e)<parse(s)) e=s;
     const data={ fid:el("fm_fid").value.trim(), name, description:el("fm_desc").value.trim(), start:s, end:e, status:el("fm_status").value, remark:el("fm_remark").value.trim() };
-    if(editing){ Object.assign(editing, data); }
-    else { M.features.push({ id:nid(), ...data, custom:{} }); M.collapsed=false; }
-    Store.save(); closeModal(); renderBoard(); toast(editing?"บันทึกฟีเจอร์แล้ว":"เพิ่มฟีเจอร์แล้ว");
+    if(editing){ apply(P2=>{ const t2=findNode(P2,featId); if(t2) Object.assign(t2, data); }); closeModal(); toast("บันทึกฟีเจอร์แล้ว"); }
+    else {
+      apply(P2=>{ const C=findNode(P2,containerId); if(!C||C.kind!=="container") return; if(!Array.isArray(C.children)) C.children=[]; const node={ id:nid(), kind:"feature", ...data, custom:{} }; C.children.push(node); revealInto(C); return {focus:node.id}; }); // R6: expand the container + focus the new row
+      closeModal(); toast("เพิ่มฟีเจอร์แล้ว");
+    }
   };
 }
 
-/* module modal (with short description) */
-function moduleModal(mi){
-  const P=proj(), editing=(mi!=null)?P.modules[mi]:null;
-  let color=editing?editing.color:(P.modules.length%PALETTE.length);
+/* module modal (with short description) — creates a root container ("main") or a child
+   container under a chosen parent ("sub"). Multi-level: any container can be a parent. */
+function moduleModal(id){
+  const P=proj(), editing=(id!=null)?findNode(P,id):null;
+  if(id!=null && !editing) return;
+  let color=editing?(editing.color||0):(P.modules.length%PALETTE.length);
   const sw=PALETTE.map((p,i)=>`<div class="swatch ${i===color?'on':''}" data-c="${i}" style="background:${p.chip}"></div>`).join("");
-  /* Feature 2.2.1 — Module / Sub-Module type + parent picker */
-  const mains=P.modules.filter(m=>m.parentId==null && m!==editing);        // candidate parents (exclude the module being edited)
-  const hasSubs=!!editing && P.modules.some(m=>m.parentId===editing.id);    // a main that already has subs can't become a sub itself
-  const canSub=mains.length>0 && !hasSubs;
-  let kind=(editing && editing.parentId!=null && mains.some(m=>m.id===editing.parentId)) ? "sub" : "main";
-  if(!canSub) kind="main";
-  let parentId=(editing && editing.parentId!=null && mains.some(m=>m.id===editing.parentId)) ? editing.parentId : (mains[0]?mains[0].id:"");
-  const parentOpts=mains.map(m=>`<option value="${esc(m.id)}" ${m.id===parentId?'selected':''}>${esc(m.name)}</option>`).join("");
+  /* candidate parents = every container EXCEPT the editing node and its own descendants */
+  const banned=new Set(); if(editing) walkTree([editing], n=>banned.add(n.id));
+  const parents=[]; walkTree(P.modules, n=>{ if(n.kind==="container" && !banned.has(n.id)) parents.push(n); });
+  const hasSubs=!!editing && (editing.children||[]).some(c=>c && c.kind==="container"); // a container that already holds sub-containers can't itself become a sub via the modal (v1.0.3 guard)
+  const canSub=parents.length>0 && !hasSubs;
+  const curParent=editing?findParent(P,editing.id):null;                   // null ⇒ currently a root container
+  const isSubNow=!!(editing && curParent && parents.some(m=>m.id===curParent.id)); // currently nested ⇒ a sub-module
+  let kind=isSubNow ? "sub" : "main";                                      // F3: a nested sub-with-children keeps showing "sub" even when the Type control is disabled (don't lie about reality)
+  let parentId=isSubNow ? curParent.id : (parents[0]?parents[0].id:"");
+  const parentOpts=parents.map(m=>`<option value="${esc(m.id)}" ${m.id===parentId?'selected':''}>${esc(m.name)}</option>`).join("");
   const kindHint=hasSubs ? "มีโมดูลย่อยอยู่ — ย้ายหรือเลื่อนขั้นโมดูลย่อยก่อน"
-              : (mains.length===0 ? "ยังไม่มีโมดูลหลักอื่นให้สังกัด — สร้างโมดูลหลักก่อน" : "");
-  /* create-mode only: optional picker to MOVE existing features (from other modules) into the new module */
+              : (parents.length===0 ? "ยังไม่มีโมดูลหลักอื่นให้สังกัด — สร้างโมดูลหลักก่อน" : "");
+  /* create-mode only: optional picker to MOVE existing features (from any container) into the new module */
   let pickerHtml="";
   if(!editing){
-    const totalFeats=P.modules.reduce((a,m)=>a+m.features.length,0);
+    let totalFeats=0; walkFeatures(P, ()=>totalFeats++);
     if(totalFeats===0){
       pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpEmpty">ยังไม่มีฟีเจอร์ให้ย้าย — สร้างฟีเจอร์ในโมดูลอื่นก่อน</div></div>`;
     }else{
-      const groups=P.modules.map(m=>{
-        if(!m.features.length) return "";
-        const p=PALETTE[m.color%PALETTE.length];
-        const rows=m.features.map(f=>`<label class="mpFeat"><input type="checkbox" class="mpChk" data-featid="${esc(f.id)}"/>${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}<span class="mpFeatName">${esc(f.name)}</span></label>`).join("");
-        return `<div class="mpGroup"><label class="mpHead"><input type="checkbox" class="mpAll"/><span class="chip" style="background:${p.chip}"></span><span class="mpModName">${esc(m.name)}</span><span class="count">${m.features.length}</span></label>${rows}</div>`;
+      const grp=[]; walkTree(P.modules, n=>{ if(n.kind==="container"){ const df=directFeatures(n); if(df.length) grp.push({m:n,feats:df}); } });
+      const groups=grp.map(({m,feats})=>{
+        const p=PALETTE[(m.color||0)%PALETTE.length];
+        const rows=feats.map(f=>`<label class="mpFeat"><input type="checkbox" class="mpChk" data-featid="${esc(f.id)}"/>${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}<span class="mpFeatName">${esc(f.name)}</span></label>`).join("");
+        return `<div class="mpGroup"><label class="mpHead"><input type="checkbox" class="mpAll"/><span class="chip" style="background:${p.chip}"></span><span class="mpModName">${esc(m.name)}</span><span class="count">${feats.length}</span></label>${rows}</div>`;
       }).join("");
       pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpList" id="mm_pick">${groups}</div><div class="mpCounter" id="mm_pickCount">เลือกแล้ว 0 ฟีเจอร์</div></div>`;
     }
@@ -1223,22 +1421,34 @@ function moduleModal(mi){
   el("mm_save").onclick=()=>{
     const name=el("mm_name").value.trim()||"โมดูลใหม่", desc=el("mm_desc").value.trim();
     const pSel=el("mm_parent");
-    const newParent=(kind==='sub' && pSel && pSel.value) ? pSel.value : null;   // null ⇒ MAIN; set ⇒ SUB of that main
-    if(editing){ editing.name=name; editing.description=desc; editing.color=color; editing.parentId=newParent; normalizeModules(P); Store.save(); closeModal(); renderBoard(); toast("บันทึกโมดูลแล้ว"); return; }
-    const newMod={id:nid(),name,description:desc,color,collapsed:false,features:[],parentId:newParent};
-    P.modules.push(newMod);
-    let moved=0;
-    if(pick){
-      const selIds=Array.from(pick.querySelectorAll('.mpChk:checked')).map(c=>c.dataset.featid); // collect ids first (remove by id, not index)
-      selIds.forEach(fid=>{
-        for(const m of P.modules){
-          if(m===newMod) continue;
-          const idx=m.features.findIndex(f=>f.id===fid);
-          if(idx>=0){ newMod.features.push(m.features.splice(idx,1)[0]); moved++; break; } // preserve object ref + source order
+    // F3: a save must NEVER change parentage unless the user explicitly changed it. When the Type control is
+    // disabled (!canSub — e.g. a nested sub that has its own sub-containers), keep the CURRENT parent (curParent),
+    // not null — otherwise a plain rename silently re-homes the whole subtree to root.
+    const newParentId=(editing && !canSub)
+      ? (curParent ? curParent.id : null)
+      : ((kind==='sub' && pSel && pSel.value) ? pSel.value : null);              // null ⇒ root container; set ⇒ child of that container
+    if(editing){
+      apply(P2=>{ const node=findNode(P2,id); if(!node) return; node.name=name; node.description=desc; node.color=color;
+        const cur=findParent(P2,id), curId=cur?cur.id:null;
+        if(newParentId!==curId){                                            // reparent (main ⇄ sub) — remove then re-insert
+          const g=removeNode(P2,id); if(!g) return;
+          const np=newParentId?findNode(P2,newParentId):null;
+          if(np && np.kind==="container"){ if(!Array.isArray(np.children)) np.children=[]; np.children.push(g); revealInto(np); }
+          else P2.modules.push(g);
         }
       });
+      closeModal(); toast("บันทึกโมดูลแล้ว"); return;
     }
-    normalizeModules(P); Store.save(); closeModal(); renderBoard();
+    let selIds=[]; const pk=el("mm_pick"); if(pk) selIds=Array.from(pk.querySelectorAll('.mpChk:checked')).map(c=>c.dataset.featid);
+    let moved=0;
+    apply(P2=>{
+      const node={id:nid(),kind:"container",name,description:desc,color,collapsed:false,children:[]};
+      const np=newParentId?findNode(P2,newParentId):null;
+      if(np && np.kind==="container"){ if(!Array.isArray(np.children)) np.children=[]; np.children.push(node); revealInto(np); }
+      else P2.modules.push(node);
+      selIds.forEach(fid=>{ const f=findNode(P2,fid); if(f && f.kind==="feature"){ const g=removeNode(P2,fid); if(g){ node.children.push(g); moved++; } } }); // move picked features in (preserve object ref)
+    });
+    closeModal();
     toast(moved>0 ? `สร้างโมดูลแล้ว · ย้าย ${moved} ฟีเจอร์เข้าโมดูล` : "สร้างโมดูลแล้ว");
   };
 }
@@ -1275,8 +1485,8 @@ let drag=null;
 function bindBars(){ el("rowsLayer").querySelectorAll('.bar').forEach(bar=> bar.addEventListener('pointerdown', onBarDown)); }
 function onBarDown(e){
   const bar=e.currentTarget, mode=e.target.dataset.mode||'move', P=proj();
-  const mi=+bar.dataset.mi, fi=+bar.dataset.fi, f=P.modules[mi].features[fi], r=getRange(), ppd=pxPerDay();
-  drag={bar,mode,mi,fi,f,ppd,rStart:r.start,startX:e.clientX,oS:daysBetween(r.start,f.start),oE:daysBetween(r.start,f.end)};
+  const id=bar.dataset.nid, f=findNode(P,id); if(!f) return; const r=getRange(), ppd=pxPerDay();
+  drag={bar,mode,id,ppd,rStart:r.start,startX:e.clientX,oS:daysBetween(r.start,f.start),oE:daysBetween(r.start,f.end)};
   bar.classList.add('dragging'); bar.setPointerCapture(e.pointerId); document.body.style.userSelect='none';
   window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp); e.preventDefault();
 }
@@ -1285,11 +1495,11 @@ function onBarMove(e){
   if(drag.mode==='move'){ s+=delta; en+=delta; } else if(drag.mode==='l'){ s=Math.min(drag.oS+delta,en); } else { en=Math.max(drag.oE+delta,s); }
   drag.bar.style.left=(s*drag.ppd+1)+"px"; drag.bar.style.width=((en-s+1)*drag.ppd-2)+"px";
   const ns=iso(addDays(drag.rStart,s)), ne=iso(addDays(drag.rStart,en));
-  const si=el("leftBody").querySelector(`input[data-mi="${drag.mi}"][data-fi="${drag.fi}"][data-field="start"]`);
-  const ei=el("leftBody").querySelector(`input[data-mi="${drag.mi}"][data-fi="${drag.fi}"][data-field="end"]`);
+  const si=el("leftBody").querySelector('input[data-nid="'+cssEsc(drag.id)+'"][data-field="start"]');
+  const ei=el("leftBody").querySelector('input[data-nid="'+cssEsc(drag.id)+'"][data-field="end"]');
   if(si) si.value=ns; if(ei) ei.value=ne; drag._s=ns; drag._e=ne;
 }
-function onBarUp(){ window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); if(!drag) return; document.body.style.userSelect=''; if(drag._s){ drag.f.start=drag._s; drag.f.end=drag._e; Store.save(); } drag.bar.classList.remove('dragging'); drag=null; renderTimeline(); } // idempotent: a second invocation is a safe no-op
+function onBarUp(){ window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); if(!drag) return; document.body.style.userSelect=''; const d=drag; drag=null; d.bar.classList.remove('dragging'); if(d._s){ apply(P=>{ const f=findNode(P,d.id); if(f){ f.start=d._s; f.end=d._e; } }); } else renderTimeline(); } // commit through apply() (R2); a no-move drag just re-renders to snap back
 
 /* =====================  ROW DRAG-REORDER  ===================== */
 let rowDrag=null;
@@ -1297,25 +1507,25 @@ function clearDrop(){ document.querySelectorAll('.dropBefore,.dropAfter,.dropInt
 function onRowDragStart(e){
   e.preventDefault();
   const featEl=e.target.closest('.featRow'); if(!featEl) return;
-  rowDrag={ smi:+featEl.dataset.mi, sfi:+featEl.dataset.fi, target:null, lastX:e.clientX, lastY:e.clientY, raf:0 };
+  rowDrag={ snid:featEl.dataset.nid, target:null, lastX:e.clientX, lastY:e.clientY, raf:0 };
   const g=featEl.cloneNode(true); g.classList.add('rowGhost'); g.style.pointerEvents='none'; g.style.width=featEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
   document.body.appendChild(g); rowDrag.ghost=g; document.body.style.userSelect='none';
   rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
   window.addEventListener('pointermove', onRowDragMove); window.addEventListener('pointerup', onRowDragUp);
 }
-/* Hit-test the point (x,y) and mark the drop target: over a featRow → insert
-   before/after it; over a module header or a collapsed module → insert at top;
-   over the "เพิ่มฟีเจอร์" add-zone → append at the end of that module. */
+/* §4 feature-drag: over a featRow → insert before/after it in ITS parent's children;
+   over a container header (.modRow) → insert at the FRONT of that container's children;
+   over the "เพิ่มฟีเจอร์" add-zone → APPEND into that container. Targets = containers at any depth. */
 function rowDragEval(x,y){
   if(!rowDrag) return;
   clearDrop(); rowDrag.target=null;
   const under=document.elementFromPoint(x,y); if(!under||!under.closest) return;
   const row=under.closest('.featRow');
-  if(row){ const rc=row.getBoundingClientRect(); const before=y<rc.top+rc.height/2; rowDrag.target={mi:+row.dataset.mi,fi:+row.dataset.fi,before}; row.classList.add(before?'dropBefore':'dropAfter'); return; }
+  if(row){ const rc=row.getBoundingClientRect(); const before=y<rc.top+rc.height/2; rowDrag.target={kind:'feat', refId:row.dataset.nid, before}; row.classList.add(before?'dropBefore':'dropAfter'); return; }
   const add=under.closest('.addFeat');
-  if(add){ const mi=+add.dataset.mi, P=proj(); const n=(P&&P.modules[mi])?P.modules[mi].features.length:0; rowDrag.target={mi,fi:n,before:true}; add.classList.add('dropInto'); return; }
+  if(add){ rowDrag.target={kind:'into', containerId:add.dataset.nid}; add.classList.add('dropInto'); return; }        // append into
   const mod=under.closest('.modRow');
-  if(mod){ rowDrag.target={mi:+mod.dataset.mi,fi:0,before:true}; mod.classList.add('dropInto'); }
+  if(mod){ rowDrag.target={kind:'into', containerId:mod.dataset.nid, front:true}; mod.classList.add('dropInto'); }   // insert at front
 }
 function onRowDragMove(e){
   if(!rowDrag) return;
@@ -1347,37 +1557,55 @@ function onRowDragUp(){
   if(rowDrag.raf) cancelAnimationFrame(rowDrag.raf);
   if(rowDrag.ghost) rowDrag.ghost.remove(); clearDrop();
   const d=rowDrag; rowDrag=null; if(!d.target) return;
-  moveFeature(d.smi,d.sfi,d.target.mi,d.target.fi,d.target.before);
+  moveFeature(d.snid, d.target);
 }
-function moveFeature(smi,sfi,tmi,tfi,before){
-  const P=proj(); const feat=P.modules[smi].features[sfi];
-  P.modules[smi].features.splice(sfi,1);
-  let idx=tfi; if(smi===tmi && sfi<tfi) idx=tfi-1; if(!before) idx+=1;
-  if(idx<0) idx=0; if(idx>P.modules[tmi].features.length) idx=P.modules[tmi].features.length;
-  P.modules[tmi].features.splice(idx,0,feat);
-  Store.save(); renderBoard();
+function moveFeature(srcId, target){
+  if(target.kind==='feat' && target.refId===srcId) return;                    // dropped on itself → no-op
+  apply(P=>{
+    const feat=findNode(P,srcId); if(!feat || feat.kind!=="feature") return;
+    if(target.kind==='feat'){
+      const refPar=findParent(P,target.refId); const arr=refPar?refPar.children:P.modules;
+      if(arr.findIndex(n=>n&&n.id===target.refId)<0) return;                   // F4: validate the drop ref BEFORE removing src (mirror the 'into' branch) — invalid ref ⇒ tree untouched
+      removeNode(P,srcId);
+      let idx=arr.findIndex(n=>n&&n.id===target.refId); if(idx<0) return;      // re-locate after removal (index may have shifted)
+      if(!target.before) idx+=1; if(idx<0) idx=0; if(idx>arr.length) idx=arr.length;
+      arr.splice(idx,0,feat);
+      if(refPar) revealInto(refPar);
+    } else { // into a container
+      const C=findNode(P,target.containerId); if(!C || C.kind!=="container") return;
+      removeNode(P,srcId);
+      if(!Array.isArray(C.children)) C.children=[];
+      if(target.front) C.children.unshift(feat); else C.children.push(feat);
+      revealInto(C);                                                          // R6: expand the container we dropped INTO
+    }
+    return {flash:srcId};
+  });
 }
 
-/* =====================  MODULE DRAG-REORDER + MOVE BUTTONS (Feature 2.1)  =====================
-   Clone of the feature-row pointer DnD, but the unit is a MODULE: a MAIN moves as a
-   whole block (main + its subs); a SUB inserts next to another sub (adopting its
-   parentId) or drops onto a MAIN modRow to become that main's first sub. Reuses
-   elementFromPoint hit-testing + edge auto-scroll (with the right pane mirrored). */
+/* =====================  MODULE DRAG-REORDER (siblings only, §4)  =====================
+   v1.0.4 module grip drag reorders among SIBLINGS of the same parent ONLY (cross-level moves
+   are the stage-2 indent/outdent buttons). A dragged container moves as a whole node — its
+   subtree travels with it. Reuses elementFromPoint hit-testing + edge auto-scroll. */
 let modDrag=null;
-function clearModDrop(){ document.querySelectorAll('.modRow.modDropBefore,.modRow.modDropAfter').forEach(x=>x.classList.remove('modDropBefore','modDropAfter')); }
-/* resolve the module index (+ which row kind) under a point — modRow, featRow, or addFeat all map to a module */
-function modAtPoint(x,y){
-  const under=document.elementFromPoint(x,y); if(!under||!under.closest) return null;
-  const mod=under.closest('.modRow'); if(mod) return {mi:+mod.dataset.mi, el:mod, kind:'mod'};
-  const feat=under.closest('.featRow'); if(feat) return {mi:+feat.dataset.mi, el:feat, kind:'feat'};
-  const add=under.closest('.addFeat'); if(add) return {mi:+add.dataset.mi, el:add, kind:'add'};
+function clearModDrop(){ document.querySelectorAll('.modDropBefore,.modDropAfter,.dropBefore,.dropAfter').forEach(x=>x.classList.remove('modDropBefore','modDropAfter','dropBefore','dropAfter')); }
+/* Climb from a hovered node to the ancestor that is a SIBLING of the dragged node (shares its
+   parent). Returns that sibling id, or null when the hover sits in a different subtree/level. */
+function siblingAncestor(P, hoverId, draggedId){
+  const dpar=findParent(P,draggedId), dparId=dpar?dpar.id:null;
+  let cur=hoverId;
+  while(cur){
+    const par=findParent(P,cur), parId=par?par.id:null;
+    if(parId===dparId) return cur;                        // cur shares dragged's parent ⇒ a sibling
+    if(!par) return null;                                 // reached a root whose parent differs ⇒ different subtree
+    cur=par.id;
+  }
   return null;
 }
 function onModDragStart(e){
   e.preventDefault();
   const modEl=e.target.closest('.modRow'); if(!modEl) return;
-  const P=proj(), mi=+modEl.dataset.mi; if(!P||!P.modules[mi]) return;
-  modDrag={ mi, target:null, lastX:e.clientX, lastY:e.clientY, raf:0, ghost:null };
+  const P=proj(), id=modEl.dataset.nid; if(!findNode(P,id)) return;
+  modDrag={ id, target:null, lastX:e.clientX, lastY:e.clientY, raf:0, ghost:null };
   const g=modEl.cloneNode(true); g.classList.add('modGhost'); g.style.pointerEvents='none'; g.style.width=modEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
   document.body.appendChild(g); modDrag.ghost=g; document.body.style.userSelect='none';
   modDrag.raf=requestAnimationFrame(modDragAutoScroll);
@@ -1389,33 +1617,19 @@ function onModDragMove(e){
   modDrag.ghost.style.left=(e.clientX-18)+"px"; modDrag.ghost.style.top=(e.clientY-14)+"px";
   modDragEval(e.clientX, e.clientY);
 }
-/* Hit-test the point and mark the drop target (main-block vs sub semantics). */
+/* Mark a drop target ONLY when the hovered row resolves to a SIBLING of the dragged node. */
 function modDragEval(x,y){
   if(!modDrag) return;
   clearModDrop(); modDrag.target=null;
-  const P=proj(), mods=P.modules, dragged=mods[modDrag.mi]; if(!dragged) return;
-  const hit=modAtPoint(x,y); if(!hit) return;
-  const hoverMod=mods[hit.mi]; if(!hoverMod) return;
-  const rc=hit.el.getBoundingClientRect(), before=y<rc.top+rc.height/2;
-  if(dragged.parentId==null){
-    // MAIN → target another whole block; hovering any row of it resolves to that block
-    const tgtMain=mainIndexOf(mods,hit.mi);
-    if(tgtMain===mainIndexOf(mods,modDrag.mi)) return;                       // own block → no target
-    modDrag.target={type:'main', mainIdx:tgtMain, before};
-    const row=el("leftBody").querySelector(`.modRow[data-mi="${tgtMain}"]`);
-    if(row) row.classList.add(before?'modDropBefore':'modDropAfter');
-  } else if(hoverMod.parentId!=null){
-    // SUB over another SUB → insert before/after it (adopts that sub's parentId)
-    if(hoverMod.id===dragged.id) return;
-    modDrag.target={type:'subToSub', tmi:hit.mi, before};
-    const row=el("leftBody").querySelector(`.modRow[data-mi="${hit.mi}"]`);
-    if(row) row.classList.add(before?'modDropBefore':'modDropAfter');
-  } else if(hit.kind==='mod'){
-    // SUB over a MAIN modRow → re-parent as that main's first sub
-    modDrag.target={type:'subToMain', tmi:hit.mi};
-    hit.el.classList.add('modDropBefore');
-  }
-  // SUB over a MAIN's feat/add rows ⇒ no target ⇒ no-op
+  const P=proj(); const under=document.elementFromPoint(x,y); if(!under||!under.closest) return;
+  const rowEl=under.closest('.modRow,.featRow,.addFeat'); if(!rowEl||!rowEl.dataset.nid) return;
+  const sibId=siblingAncestor(P, rowEl.dataset.nid, modDrag.id); if(!sibId || sibId===modDrag.id) return;
+  const rc=rowEl.getBoundingClientRect(), before=y<rc.top+rc.height/2;
+  modDrag.target={sibId, before};
+  const sibRow=el("leftBody").querySelector('.modRow[data-nid="'+cssEsc(sibId)+'"], .featRow[data-nid="'+cssEsc(sibId)+'"]');
+  const mark=sibRow||rowEl;
+  if(mark.classList.contains('modRow')) mark.classList.add(before?'modDropBefore':'modDropAfter');
+  else mark.classList.add(before?'dropBefore':'dropAfter');
 }
 /* Edge auto-scroll the left pane while dragging; keep the right pane's scrollTop mirrored. */
 function modDragAutoScroll(){
@@ -1440,55 +1654,21 @@ function onModDragUp(){
   if(modDrag.raf) cancelAnimationFrame(modDrag.raf);
   if(modDrag.ghost) modDrag.ghost.remove(); clearModDrop();
   const d=modDrag; modDrag=null; if(!d.target) return;
-  const P=proj(), mods=P.modules, dragged=mods[d.mi]; if(!dragged) return;
-  const before=moduleOrderSig(mods);                                         // capture BEFORE any parentId mutation
-  let next=null;
-  if(d.target.type==='main'){
-    next=computeMainBlockMove(mods, d.mi, d.target.mainIdx, d.target.before);
-  } else if(d.target.type==='subToSub'){
-    const tgt=mods[d.target.tmi]; if(!tgt) return;
-    dragged.parentId=tgt.parentId;
-    const rest=mods.filter(m=>m!==dragged);
-    let ti=rest.findIndex(m=>m.id===tgt.id); if(ti<0) return; if(!d.target.before) ti+=1;
-    next=rest.slice(0,ti).concat([dragged], rest.slice(ti));
-  } else if(d.target.type==='subToMain'){
-    const main=mods[d.target.tmi]; if(!main) return;
-    dragged.parentId=main.id;
-    const rest=mods.filter(m=>m!==dragged);
-    let ti=rest.findIndex(m=>m.id===main.id); if(ti<0) return; ti+=1;         // right after the main = first sub
-    next=rest.slice(0,ti).concat([dragged], rest.slice(ti));
-  }
-  commitModuleMove(P, before, next);
+  moveNodeBeside(d.id, d.target.sibId, d.target.before);
 }
-/* Reordered array that moves a MAIN block before/after a target block. */
-function computeMainBlockMove(mods, srcMainIdx, tgtMainIdx, before){
-  const [s0,s1]=blockRange(mods,srcMainIdx), block=mods.slice(s0,s1);
-  const rest=mods.slice(0,s0).concat(mods.slice(s1));
-  const ri=rest.findIndex(m=>m.id===mods[tgtMainIdx].id); if(ri<0) return null;
-  const [rt0,rt1]=blockRange(rest, ri), at=before?rt0:rt1;
-  return rest.slice(0,at).concat(block, rest.slice(at));
-}
-/* modup/moddown: a MAIN swaps with the adjacent MAIN block; a SUB swaps with the adjacent sibling sub. */
-function moveModuleUpDown(mi, dir){
-  const P=proj(), mods=P.modules, m=mods[mi]; if(!m) return;
-  const before=moduleOrderSig(mods); let next=null;
-  if(m.parentId==null){
-    const [s0,s1]=blockRange(mods,mi);
-    if(dir<0){ if(s0<=0) return; const [p0,p1]=blockRange(mods, mainIndexOf(mods,s0-1)); next=mods.slice(0,p0).concat(mods.slice(s0,s1), mods.slice(p0,p1), mods.slice(s1)); }
-    else { if(s1>=mods.length) return; const [n0,n1]=blockRange(mods,s1); next=mods.slice(0,s0).concat(mods.slice(n0,n1), mods.slice(s0,s1), mods.slice(n1)); }
-  } else {
-    const sibs=[]; mods.forEach((x,i)=>{ if(x.parentId===m.parentId) sibs.push(i); });
-    const pos=sibs.indexOf(mi), sw=dir<0?sibs[pos-1]:sibs[pos+1]; if(sw==null) return;
-    next=mods.slice(); [next[mi],next[sw]]=[next[sw],next[mi]];
-  }
-  commitModuleMove(P, before, next);
-}
-/* Commit a reordered module array only if it actually changed (drop-in-place ⇒ no-op). */
-function commitModuleMove(P, beforeSig, next){
-  if(!next) return false;
-  const test={modules:next.slice()}; normalizeModules(test);
-  if(moduleOrderSig(test.modules)===beforeSig) return false;                  // no change → no save, no render
-  P.modules=test.modules; Store.save(); renderBoard(); return true;
+/* Reorder `id` before/after a SIBLING (`sibId`) within their shared parent's children (or the
+   root list). Drop-in-place ⇒ no-op (no save/render). */
+function moveNodeBeside(id, sibId, before){
+  if(!id || !sibId || id===sibId) return;
+  const P=proj();
+  const par=findParent(P,id), spar=findParent(P,sibId);
+  if((par?par.id:null)!==(spar?spar.id:null)) return;                         // siblings-only guard
+  const arr=par?par.children:P.modules;
+  const from=arr.findIndex(n=>n&&n.id===id), ref=arr.findIndex(n=>n&&n.id===sibId);
+  if(from<0||ref<0) return;
+  let to=ref+(before?0:1); if(from<to) to-=1;                                 // account for the removal shift
+  if(to===from) return;                                                       // already in place
+  apply(P2=>{ const a=findParent(P2,id), list=a?a.children:P2.modules; const g=removeNode(P2,id); if(!g) return; let t=list.findIndex(n=>n&&n.id===sibId); if(t<0){ list.push(g); return; } if(!before) t+=1; list.splice(t,0,g); });
 }
 
 /* =====================  COLUMN DRAG-REORDER  ===================== */
@@ -1575,13 +1755,15 @@ function exportXlsx(){
   const P=proj(), customLabels=P.customCols.map(c=>c.label);
   const header=["Module","Feature ID","Feature","Description","Start","End","Status","Remark",...customLabels];
   const aoa=[header];
-  P.modules.forEach(m=>{
-    const parent=m.parentId!=null ? P.modules.find(x=>x.id===m.parentId) : null;
-    const modLabel=parent ? (parent.name+" › "+m.name) : m.name;              // sub-module features show "Parent › Sub"
-    m.features.forEach(f=>{
-      aoa.push([modLabel,f.fid||"",f.name,f.description||"",f.start,f.end,stById(f.status).en,f.remark||"",...P.customCols.map(c=>f.custom[c.id]||"")]);
+  // §4: rows in flatten order; Module column = full container path "A › B › C".
+  const path=[];
+  (function rec(nodes){
+    (nodes||[]).forEach(n=>{
+      if(!n) return;
+      if(n.kind==="container"){ path.push(n.name); rec(n.children||[]); path.pop(); }
+      else aoa.push([path.join(" › "),n.fid||"",n.name,n.description||"",n.start,n.end,stById(n.status).en,n.remark||"",...P.customCols.map(c=>(n.custom&&n.custom[c.id])||"")]);
     });
-  });
+  })(P.modules);
   const ws=XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols']=[{wch:26},{wch:11},{wch:30},{wch:40},{wch:12},{wch:12},{wch:13},{wch:18},...customLabels.map(()=>({wch:18}))];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Timeline");
@@ -1629,7 +1811,7 @@ function importWorkbook(buf){
     const name=String(row[map.name]).trim(); if(!name) continue;
     let s=map.start!=null?toISO(row[map.start]):"", e=map.end!=null?toISO(row[map.end]):"";
     if(!s&&!e){ const t=today(); s=iso(t); e=iso(addDays(t,7)); } else if(!e) e=s; else if(!s) s=e;
-    const f={id:nid(),fid:map.fid!=null?String(row[map.fid]).trim():"",name,description:map.description!=null?String(row[map.description]).trim():"",start:s,end:e,status:map.status!=null?statusFromText(row[map.status]):"not_started",remark:map.remark!=null?String(row[map.remark]).trim():"",custom:{}};
+    const f={id:nid(),kind:"feature",fid:map.fid!=null?String(row[map.fid]).trim():"",name,description:map.description!=null?String(row[map.description]).trim():"",start:s,end:e,status:map.status!=null?statusFromText(row[map.status]):"not_started",remark:map.remark!=null?String(row[map.remark]).trim():"",custom:{}};
     customDefs.forEach(cd=> f.custom[cd.id]=String(row[cd.col]??"").trim());
     if(!groups.has(modName)) groups.set(modName,[]); groups.get(modName).push(f);
   }
@@ -1637,9 +1819,10 @@ function importWorkbook(buf){
   P.customCols=customDefs.map(({id,label,w,kind})=>({id,label,w,kind}));
   P.colOrder=DEFAULT_ORDER.concat(P.customCols.map(c=>"c:"+c.id));
   P.modules=[]; let ci=0;
-  groups.forEach((feats,name)=>{ P.modules.push({id:nid(),name,description:"",color:ci++%PALETTE.length,collapsed:false,features:feats}); });
-  P.progressOrder=P.modules.map(m=>m.id);
-  Store.save(); renderTab(ui.tab);
+  // import stays flat (path strings arrive as container names; no round-trip parsing) — build root containers
+  groups.forEach((feats,name)=>{ P.modules.push({id:nid(),kind:"container",name,description:"",color:ci++%PALETTE.length,collapsed:false,children:feats}); });
+  P.docVer=2; P.progressOrder=P.modules.map(m=>m.id);
+  normalizeTree(P); Store.save(); renderTab(ui.tab);
   toast(`นำเข้าแล้ว: ${P.modules.length} โมดูล · ${[...groups.values()].reduce((a,b)=>a+b.length,0)} ฟีเจอร์`);
 }
 
@@ -1679,7 +1862,7 @@ function downloadBackupFile(){
 function restoreFromObject(obj, label){
   if(!obj || !Array.isArray(obj.projects)){ toast("ไฟล์สำรองไม่ถูกต้อง"); return; }
   if(!confirm("กู้คืนข้อมูล" + (label?(" จาก"+label):"") + "? ข้อมูลปัจจุบันทั้งหมดจะถูกแทนที่")) return;
-  DB = obj; MEM = DB; Store.save();      // persists locally + pushes to cloud if enabled
+  DB = obj; migrateDB(DB); MEM = DB; Store.save();      // migrate a possibly-v1 backup → tree, then persist (+ mirror) + cloud push
   PID = null; closeModal(); location.hash = ""; route(); toast("กู้คืนข้อมูลเรียบร้อย");
 }
 function restoreBackupFile(file){

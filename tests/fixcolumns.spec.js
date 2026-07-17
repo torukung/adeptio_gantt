@@ -110,7 +110,7 @@ test.describe("wrap toggle", () => {
     await openProject(page, "test-proj");
     await gotoTimeline(page);
 
-    const rowSel = '.featRow[data-mi="0"][data-fi="0"]';
+    const rowSel = '.featRow[data-nid="fa1"]'; // v1.0.4: row addressed by feature node id (minimalDoc first feature = "fa1")
     const hBefore = (await boxOf(page, rowSel)).height;
     await assertPanesAligned(page, "wrap off");
 
