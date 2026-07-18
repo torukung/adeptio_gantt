@@ -83,13 +83,14 @@ test("FIX3: a live drag sets the interaction guard so a storage adopt is deferre
   // v1.0.4: rows addressed by data-nid (minimalDoc's first feature id = "fa1").
   const gb = await boxOf(page, '.featRow[data-nid="fa1"] .grip');
   await page.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2);
+  await page.waitForTimeout(60); // settle: hovering the grip opens the stage-2 pill (clip-path transition); let hit-testing stabilize before the press so the drag start is deterministic under load
   await page.mouse.down();
   await page.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2 + 24, { steps: 5 }); // enter rowDrag
 
   // The app reports it is interacting/editing, so cloudPull + the storage listener defer.
   expect(await page.evaluate(() => window["isInteracting"]())).toBe(true);
   expect(await page.evaluate(() => window["editingNow"]())).toBe(true);
-  expect(await page.locator(".rowGhost").count()).toBeGreaterThan(0); // drag is live
+  await expect(page.locator(".rowGhost")).toHaveCount(1); // drag is live (auto-retrying: absorbs headless input jitter; a real drag failure still fails)
 
   // Simulate a cross-tab write of a DIFFERENT doc + the storage event that drives adoption.
   await page.evaluate((key) => {
@@ -103,7 +104,7 @@ test("FIX3: a live drag sets the interaction guard so a storage adopt is deferre
   // (An adopt would run route()->renderProject, resetting to the summary tab and
   //  destroying the grid, which would corrupt the in-flight drag.)
   await expect(page.locator('.modRow[data-nid="mod-a"] .modName')).toHaveText("Module A");
-  expect(await page.locator(".rowGhost").count()).toBeGreaterThan(0);
+  await expect(page.locator(".rowGhost")).toHaveCount(1);
 
   await page.mouse.up(); // finish the drag cleanly
   expect(await page.evaluate(() => window["isInteracting"]())).toBe(false);

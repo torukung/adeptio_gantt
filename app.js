@@ -50,11 +50,22 @@ function startOfMonth(d){ return new Date(d.getFullYear(),d.getMonth(),1); }
 function endOfMonth(d){ return new Date(d.getFullYear(),d.getMonth()+1,0); }
 function today(){ const t=new Date(); return new Date(t.getFullYear(),t.getMonth(),t.getDate()); }
 const LS_UI = "adeptio_ptrack_ui";
-const ui = { zoom:"week", cal:"CE", wrapTxt:false, colW:{} };
-try{ const _u=JSON.parse(localStorage.getItem(LS_UI)||"{}"); if(_u && typeof _u==="object"){ if("wrapTxt" in _u) ui.wrapTxt=!!_u.wrapTxt; if(_u.colW && typeof _u.colW==="object") ui.colW=_u.colW; } }catch(e){}
+/* v1.0.4 §1.8 / R12 — continuous Gantt zoom: px-per-day (PPD) ∈ [0.9,34], persisted per-device in
+   `ui` (LS_UI), NEVER in the doc. The three legacy day/week/month presets survive only as shortcuts
+   that set an exact PPD (Day→34, Week→11, Month→4.4, clamped into range). */
+const PPD_MIN=0.9, PPD_MAX=34;
+const PRESET_PPD={ day:34, week:11, month:4.4 };
+function clampPpd(v){ v=+v; if(!isFinite(v)) v=PRESET_PPD.week; return Math.max(PPD_MIN, Math.min(PPD_MAX, v)); }
+const ui = { cal:"CE", wrapTxt:false, colW:{}, ppd:PRESET_PPD.week };  // default zoom = week (11px/day), same as v1.0.3
+try{ const _u=JSON.parse(localStorage.getItem(LS_UI)||"{}"); if(_u && typeof _u==="object"){
+  if("wrapTxt" in _u) ui.wrapTxt=!!_u.wrapTxt;
+  if(_u.colW && typeof _u.colW==="object") ui.colW=_u.colW;
+  if("ppd" in _u && _u.ppd!=null && isFinite(+_u.ppd)) ui.ppd=clampPpd(_u.ppd);                        // R12: restore continuous zoom, sanitized into [0.9,34]
+  else if(typeof _u.zoom==="string" && PRESET_PPD[_u.zoom]!=null) ui.ppd=clampPpd(PRESET_PPD[_u.zoom]); // legacy: a stored preset string maps to its PPD ONCE (saveUi no longer writes `zoom`, so it drops next save)
+} }catch(e){}
 /* FIX: colW is now namespaced per project ({pid:{key:w}}). Drop any legacy flat {key:w} (numeric top-level values) so old widths can't bleed across projects or corrupt the nested shape. */
 if(ui.colW && Object.keys(ui.colW).some(k=>typeof ui.colW[k]==="number")) ui.colW={};
-function saveUi(){ try{ localStorage.setItem(LS_UI, JSON.stringify({wrapTxt:!!ui.wrapTxt, colW:ui.colW||{}})); }catch(e){} }
+function saveUi(){ try{ localStorage.setItem(LS_UI, JSON.stringify({wrapTxt:!!ui.wrapTxt, colW:ui.colW||{}, ppd:clampPpd(ui.ppd)})); }catch(e){} } // R12: persist ppd beside wrapTxt/colW; never the doc, and no legacy `zoom` key
 function dispYear(d){ return ui.cal==="BE" ? d.getFullYear()+543 : d.getFullYear(); }
 function monName(mi){ return ui.cal==="BE" ? TH_MON[mi] : EN_MON[mi]; }
 function fmtThai(d){ return d.getDate()+" "+monName(d.getMonth())+" "+String(dispYear(d)).slice(-2); }
@@ -140,6 +151,14 @@ function wireDragGuard(){                                                       
   const endDrag=()=>{ _dragging=false; };
   document.addEventListener('pointerup', endDrag, true);
   document.addEventListener('pointercancel', endDrag, true);
+}
+/* H2: the months-in-view readout depends on #rightScroll.clientWidth, which changes on a window resize
+   with NO re-render. One debounced resize listener (wired once, like wireDragGuard) refreshes the readout
+   only — never a re-render. */
+let _resizeGuardWired=false, _resizeT=0;
+function wireResizeGuard(){                                                            // register ONCE; idempotent even if startup ran twice
+  if(_resizeGuardWired) return; _resizeGuardWired=true;
+  window.addEventListener('resize', ()=>{ clearTimeout(_resizeT); _resizeT=setTimeout(()=>{ if(el("rightScroll")) syncZoomUI(); }, 150); }); // debounced ~150ms; readout refresh ONLY when the timeline is present
 }
 function schedulePush(){ pushPending=true; clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, 800); }
 async function cloudPush(){
@@ -473,7 +492,8 @@ function renderProject(){
         <div class="seg"><button id="chLeft" title="เลื่อนชาร์ตซ้าย">◀</button><span class="lbl">Chart</span><button id="chRight" title="เลื่อนชาร์ตขวา">▶</button></div>
       </div>
       <div class="toolgroup tlOnly">
-        <div class="seg"><span class="lbl">Zoom</span><button data-zoom="day">Day</button><button data-zoom="week" class="on">Week</button><button data-zoom="month">Month</button></div>
+        <div class="seg"><span class="lbl">Zoom</span><button data-zoom="day">Day</button><button data-zoom="week">Week</button><button data-zoom="month">Month</button></div>
+        <div class="seg zoomCtl"><button id="zoomOut" title="ซูมออก">−</button><span class="lbl" id="zoomReadout">— เดือน</span><button id="zoomIn" title="ซูมเข้า">+</button><button id="zoomFit" title="พอดี ~9 เดือน">พอดี</button></div>
         <div class="seg"><button data-cal="CE" class="on">ค.ศ.</button><button data-cal="BE">พ.ศ.</button></div>
         <button class="btn sm" id="btnToday">Today</button>
       </div>
@@ -552,7 +572,11 @@ function wireBoard(){
 
 function wireProjectControls(){
   document.querySelectorAll('.tabBtn').forEach(b=> b.onclick=()=> switchTab(b.dataset.tab));
-  document.querySelectorAll('[data-zoom]').forEach(b=>b.onclick=()=>{ ui.zoom=b.dataset.zoom; document.querySelectorAll('[data-zoom]').forEach(x=>x.classList.toggle('on',x===b)); renderTimeline(); });
+  document.querySelectorAll('[data-zoom]').forEach(b=>b.onclick=()=> applyZoom(PRESET_PPD[b.dataset.zoom]));   // preset → exact PPD, centred; syncZoomUI drives the active state
+  { const zi=el("zoomIn"), zo=el("zoomOut"), zf=el("zoomFit");
+    if(zi) zi.onclick=()=> applyZoom(pxPerDay()*1.35);   // §1.8 step ×1.35, centred on the viewport midpoint
+    if(zo) zo.onclick=()=> applyZoom(pxPerDay()/1.35);   // step ÷1.35
+    if(zf) zf.onclick=()=> applyZoom(fitPpd()); }         // reset = fit ≈ 9 months
   document.querySelectorAll('[data-cal]').forEach(b=>b.onclick=()=>{ ui.cal=b.dataset.cal; document.querySelectorAll('[data-cal]').forEach(x=>x.classList.toggle('on',x===b)); updateMeta(); if(ui.tab==="timeline") renderTimeline(); });
   el("btnToday").onclick = ()=>{ const R=el("rightScroll"); if(!R) return; const r=getRange(), t=today(); if(t<r.start||t>r.end){ toast("วันนี้อยู่นอกช่วงของแผน"); return;} const x=daysBetween(r.start,t)*pxPerDay(); R.scrollTo({left:Math.max(0,x-R.clientWidth/2),behavior:'smooth'}); };
   el("colLeft").onclick = ()=>{ const e2=el("leftScroll"); if(e2) e2.scrollBy({left:-220,behavior:'smooth'}); };
@@ -592,6 +616,7 @@ function onSplitUp(){
   document.body.style.userSelect=''; document.body.style.cursor=''; el("splitter").classList.remove('drag');
   const P=proj(); if(P){ P.leftW=Math.round(el("leftScroll").getBoundingClientRect().width); Store.save(); }
   split=null;
+  syncZoomUI();                                      // H2: the splitter changes #rightScroll.clientWidth without a re-render → refresh the months-in-view readout (no re-render)
 }
 
 /* =====================  STATUS & SUMMARY  ===================== */
@@ -782,8 +807,35 @@ function allCols(){
     return c;
   });
 }
-const PX = { day:38, week:11, month:4.4 };
-const pxPerDay = () => PX[ui.zoom];
+/* §1.8 continuous zoom. pxPerDay() is the SINGLE source of the day width (ui.ppd, clamped). tickMode()
+   picks the axis/grid granularity from PPD so the axis stays legible across the whole range (the presets
+   land on their old modes: 34→day, 11→week, 4.4→month). */
+const pxPerDay = () => clampPpd(ui.ppd);
+function tickMode(){ const p=pxPerDay(); return p>=18 ? "day" : (p>=6.2 ? "week" : "month"); }
+/* §1.9 bar-label font curve: clamp(6.4, 6.2 + PPD×0.55, 11.5)px; the label is HIDDEN (status-dot only)
+   when its computed size < 7.5px OR the bar is narrower than 34px. */
+function barLabelPx(ppd){ ppd=(ppd==null?pxPerDay():ppd); return Math.max(6.4, Math.min(11.5, 6.2 + ppd*0.55)); }
+function labelHidden(ppd, barW){ return barLabelPx(ppd) < 7.5 || barW < 34; }
+/* §1.8 readout: months in view = viewportWidth / (PPD × 30.4). */
+function monthsInView(){ const R=el("rightScroll"); const cw=R?R.clientWidth:0; return cw>0 ? cw/(pxPerDay()*30.4) : 0; }
+function fitPpd(){ const R=el("rightScroll"); const cw=R?R.clientWidth:0; return cw>0 ? cw/(9*30.4) : PRESET_PPD.month; } // reset = fit ≈ 9 months
+/* Refresh the zoom readout (Thai-first "N.N เดือน") + the preset buttons' active state for the current PPD. */
+function syncZoomUI(){
+  const ro=el("zoomReadout"); if(ro){ const m=monthsInView(); ro.textContent = m>0 ? (Math.round(m*10)/10).toFixed(1)+" เดือน" : "— เดือน"; }
+  const ppd=pxPerDay();
+  document.querySelectorAll('[data-zoom]').forEach(b=>{ const pv=PRESET_PPD[b.dataset.zoom]; b.classList.toggle('on', pv!=null && Math.abs(clampPpd(pv)-ppd)<1e-6); });
+}
+/* Centre-preserving zoom (§1.8): the date at the horizontal centre of #rightScroll stays centred after the
+   re-render — newScrollLeft = centreDay×newPPD − clientWidth/2 (clamped ≥0). Used by −/+, the presets and
+   reset. renderTimeline rebuilds bars, so label transforms start clean (R10); we re-apply them post-scroll. */
+function applyZoom(targetPpd){
+  if(_dragging) return;                                // H3a: a zoom re-render mid bar-drag would rebuild #rowsLayer and detach the dragged .bar → ignore zoom while a drag/resize is live
+  const R=el("rightScroll"), oldPpd=pxPerDay(); let centreDay=null, cw=0;
+  if(R){ cw=R.clientWidth; centreDay=(R.scrollLeft+cw/2)/oldPpd; }
+  ui.ppd=clampPpd(targetPpd); saveUi();
+  renderTimeline();                                    // rebuilds axis/grid/bars at the new PPD (and calls syncZoomUI)
+  if(R && centreDay!=null){ R.scrollLeft=Math.max(0, centreDay*pxPerDay() - cw/2); updateStickyLabels(); } // re-centre, then re-apply post-shift sticky labels
+}
 function getRange(){
   let mn=null,mx=null;
   walkFeatures(proj(), f=>{ const s=parse(f.start),e=parse(f.end); if(!mn||s<mn)mn=s; if(!mx||e>mx)mx=e; }); // recursive over the whole tree
@@ -1140,17 +1192,18 @@ function renderTimeline(rows){
     months += `<div class="monthBand" style="width:${w}px">${monName(cur.getMonth())} ${showYear?dispYear(cur):"’"+String(dispYear(cur)).slice(-2)}</div>`;
     cur=startOfMonth(addDays(mEnd,1));
   }
+  const tm=tickMode();                                  // §1.8: axis/grid granularity derived from the continuous PPD (was ui.zoom)
   let ticks="";
-  if(ui.zoom==="day"){ for(let i=0;i<totalDays;i++){ const d=addDays(r.start,i),wd=d.getDay(); ticks+=`<div class="tick ${(wd===0||wd===6)?'wkend':''} ${d.getDate()===1?'mstart':''}" style="width:${ppd}px">${d.getDate()}</div>`; } }
-  else if(ui.zoom==="week"){ for(let i=0;i<totalDays;i+=7){ const d=addDays(r.start,i),w=Math.min(7,totalDays-i)*ppd; ticks+=`<div class="tick" style="width:${w}px">${d.getDate()}/${d.getMonth()+1}</div>`; } }
+  if(tm==="day"){ for(let i=0;i<totalDays;i++){ const d=addDays(r.start,i),wd=d.getDay(); ticks+=`<div class="tick ${(wd===0||wd===6)?'wkend':''} ${d.getDate()===1?'mstart':''}" style="width:${ppd}px">${d.getDate()}</div>`; } }
+  else if(tm==="week"){ for(let i=0;i<totalDays;i+=7){ const d=addDays(r.start,i),w=Math.min(7,totalDays-i)*ppd; ticks+=`<div class="tick" style="width:${w}px">${d.getDate()}/${d.getMonth()+1}</div>`; } }
   else { for(let i=0;i<totalDays;i+=7){ const w=Math.min(7,totalDays-i)*ppd; ticks+=`<div class="tick" style="width:${w}px"></div>`; } }
   el("axis").innerHTML=`<div id="axisMonths" style="width:${W}px">${months}</div><div id="axisTicks" style="width:${W}px">${ticks}</div>`;
 
   let grid="";
-  if(ui.zoom==="day"){
+  if(tm==="day"){
     for(let i=0;i<=totalDays;i++){ const d=addDays(r.start,i),x=i*ppd; grid+=`<div class="vline ${d.getDate()===1?'month':''}" style="left:${x}px"></div>`; if(i<totalDays){ const wd=d.getDay(); if(wd===0||wd===6) grid+=`<div class="wband" style="left:${x}px;width:${ppd}px"></div>`; } }
   } else {
-    for(let i=0;i<=totalDays;i++){ const d=addDays(r.start,i); if(d.getDate()===1||i===0||i===totalDays) grid+=`<div class="vline month" style="left:${i*ppd}px"></div>`; else if(ui.zoom==="week"&&daysBetween(r.start,d)%7===0) grid+=`<div class="vline" style="left:${i*ppd}px"></div>`; }
+    for(let i=0;i<=totalDays;i++){ const d=addDays(r.start,i); if(d.getDate()===1||i===0||i===totalDays) grid+=`<div class="vline month" style="left:${i*ppd}px"></div>`; else if(tm==="week"&&daysBetween(r.start,d)%7===0) grid+=`<div class="vline" style="left:${i*ppd}px"></div>`; }
   }
   const t=today();
   if(t>=r.start&&t<=r.end){ const x=daysBetween(r.start,t)*ppd+ppd/2; grid+=`<div id="todayLine" style="left:${x}px"></div><div id="todayFlag" style="left:${x}px">วันนี้ ${fmtThai(t)}</div>`; }
@@ -1158,21 +1211,24 @@ function renderTimeline(rows){
 
   let rowsHtml="", altCount=0;
   rows.forEach(row=>{
-    const n=row.node;
+    const n=row.node, sh=shadeVar(row.depth);           // §1.6 right-pane shading: SAME shadeVar(depth) as the row's left twin (frame-sync made visible)
     if(row.type==="container"){
       const p=PALETTE[(n.color||0)%PALETTE.length];
-      let ms=null,me=null; containerFeatures(n).forEach(f=>{ const s=parse(f.start),e=parse(f.end); if(!ms||s<ms)ms=s; if(!me||e>me)me=e; }); // R7: span derives from ALL descendant features; empty container ⇒ no bar
+      let ms=null,me=null; containerFeatures(n).forEach(f=>{ const s=parse(f.start),e=parse(f.end); if(!ms||s<ms)ms=s; if(!me||e>me)me=e; }); // R7 / §5.3: span derives from ALL descendant features at any depth; empty container ⇒ no bar
       let modBar="";
       if(ms){ const left=daysBetween(r.start,ms)*ppd, w=(daysBetween(ms,me)+1)*ppd; modBar=`<div class="modBar" style="left:${left}px;width:${w}px"><div class="cap l" style="background:${p.border}"></div><div class="span" style="background:${p.border}"></div><div class="cap r" style="background:${p.border}"></div></div>`; }
-      rowsHtml += `<div class="modBarRow" style="width:${W}px" data-nid="${esc(n.id)}">${modBar}</div>`;
+      rowsHtml += `<div class="modBarRow" style="width:${W}px;${sh}" data-nid="${esc(n.id)}">${modBar}</div>`;
     } else if(row.type==="feature"){
       const f=n, pc=PALETTE[((row.parent&&row.parent.color)||0)%PALETTE.length]; // bar colour = parent container's palette (as v1.0.3)
       const left=daysBetween(r.start,f.start)*ppd, w=Math.max(ppd,(daysBetween(f.start,f.end)+1)*ppd);
       const alt=(altCount++ %2)===1?"alt":""; const dur=daysBetween(f.start,f.end)+1; const st=stById(f.status);
       const tip=`${f.fid?f.fid+" · ":""}${f.name}\n${fmtThai(parse(f.start))} → ${fmtThai(parse(f.end))} (${dur} วัน)\nสถานะ: ${st.th}${f.remark?"\nหมายเหตุ: "+f.remark:""}`;
-      rowsHtml += `<div class="barRow ${alt}" style="width:${W}px"><div class="bar" data-nid="${esc(f.id)}" data-tip="${esc(tip)}" style="left:${left+1}px;width:${w-2}px;background:${pc.fill};border-color:${pc.border};color:${pc.ink}"><div class="handle l" data-mode="l"></div><span class="sdot" style="background:${st.color}"></span><span class="blabel">${esc(f.name)}</span><div class="handle r" data-mode="r"></div></div></div>`;
-    } else { // add-zone → 32px spacer aligned with the left addFeat row (keeps the panes 1:1)
-      rowsHtml += `<div class="barRow" style="width:${W}px;height:32px;border-bottom:1px solid var(--line)"></div>`;
+      const fs=barLabelPx(ppd), hide=labelHidden(ppd, w);   // §1.9 label font curve + hide (status-dot only) at small size/width
+      const lblStyle=`font-size:${fs.toFixed(2)}px${hide?';display:none':''}`;
+      const bw=Math.max(2, w-2);                            // H1: at PPD<2 a short bar's (w-2) goes NEGATIVE → invalid CSS → the width declaration drops and the .bar auto-sizes to its content (handles+dot+label). Floor at 2px (keeps the −2 inset for normal widths). Dates stay safe: the drag commits day deltas (onBarMove reads drag.oS/oE, never bar.style.width). .bar has overflow:hidden so the dot/handles stay clipped inside the 2px box.
+      rowsHtml += `<div class="barRow ${alt}" style="width:${W}px;${sh}" data-nid="${esc(f.id)}"><div class="bar" data-nid="${esc(f.id)}" data-tip="${esc(tip)}" style="left:${left+1}px;width:${bw}px;background:${pc.fill};border-color:${pc.border};color:${pc.ink}"><div class="handle l" data-mode="l"></div><span class="sdot" style="background:${st.color}"></span><span class="blabel" style="${lblStyle}">${esc(f.name)}</span><div class="handle r" data-mode="r"></div></div></div>`;
+    } else { // add-zone → 32px spacer aligned with the left addFeat row (1:1 panes); shade uses depth+1 to match the left addFeat
+      rowsHtml += `<div class="barRow" style="width:${W}px;height:32px;border-bottom:1px solid var(--line);${shadeVar(row.depth+1)}" data-nid="${esc(n.id)}"></div>`;
     }
   });
   el("rowsLayer").style.width=W+"px"; el("rowsLayer").innerHTML=rowsHtml;
@@ -1181,6 +1237,7 @@ function renderTimeline(rows){
   bindBars();
   applyWrap();
   updateStickyLabels();                                 // apply the sliding-label shift for the current scroll (fresh bars start at transform:'')
+  syncZoomUI();                                         // refresh the months-in-view readout + preset active-state for the current PPD
 }
 
 /* ---- Wrap Txt: sync chart row heights with (possibly wrapped) left rows ---- */
@@ -1236,6 +1293,7 @@ function isClipped(inner, container){
        intersection of the bar's box (overflow:hidden) and #rightScroll's viewport. */
 function labelNeedsTip(lbl){
   if(!lbl) return false;
+  if(lbl.style.display==='none') return true;                // §1.9: a zoom-hidden label (small size/width) always qualifies for the hover bubble
   if((lbl.scrollWidth - lbl.clientWidth) > 1) return true;   // truncated inside its own box (ellipsis)
   const bar=lbl.closest('.bar'), R=el('rightScroll');
   if(!bar || !R) return isClipped(lbl, el('rightScroll'));   // fallback: viewport-only clip
@@ -1258,6 +1316,7 @@ function updateStickyLabels(){
   const vpLeft=R.scrollLeft, vpRight=vpLeft+R.clientWidth, PAD=9;   // PAD matches .bar's left padding
   layer.querySelectorAll('.bar').forEach(bar=>{
     const lbl=bar.querySelector('.blabel'); if(!lbl) return;
+    if(lbl.style.display==='none'){ if(lbl.style.transform) lbl.style.transform=''; return; } // §1.9: hidden label → no sticky slide (skip while invisible)
     const barLeft=parseFloat(bar.style.left)||0;
     const barW=parseFloat(bar.style.width)||bar.offsetWidth;
     if(barLeft+barW < vpLeft || barLeft > vpRight){ if(lbl.style.transform) lbl.style.transform=''; return; } // fully off-viewport
@@ -2120,6 +2179,7 @@ async function backupModal(){
 Store.load();
 route();
 wireDragGuard();                                       // one centralized capture-phase pointerdown/up/cancel guard for background-sync deferral
+wireResizeGuard();                                     // H2: one debounced window-resize listener → refreshes the months-in-view readout (no re-render)
 window.addEventListener('hashchange', route);
 window.addEventListener('storage', e=>{ if(e.key===LS_KEY && !editingNow()){ Store.load(); route(); } }); // FIX: don't reload/re-render from a cross-tab write while a drag/resize or edit is in flight
 if(cloudOn()){ cloudSync(); window.addEventListener('focus', ()=>cloudPull(false)); setInterval(()=>cloudPull(false), 30000); }

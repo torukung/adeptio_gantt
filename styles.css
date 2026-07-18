@@ -61,6 +61,11 @@ button{font-family:inherit; cursor:pointer;}
 .seg button:disabled{color:var(--ink-faint); opacity:.5; cursor:not-allowed;}
 .seg button:disabled:hover{color:var(--ink-faint);}
 .seg .lbl{font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); padding:0 8px; align-self:center;}
+/* §1.8 continuous-zoom controls (−/readout/+/fit) reuse the .seg idiom. The readout shows months-in-view
+   (Thai) and keeps a stable width so the number doesn't jitter as it changes. */
+.seg #zoomReadout{min-width:76px; text-align:center; color:var(--ink-soft); text-transform:none; letter-spacing:0; font-size:11px;}
+.seg.zoomCtl button{min-width:30px;}
+#zoomIn,#zoomOut{font-size:14px; line-height:1;}   /* H3b: scope the glyph sizing to the −/+ buttons only, so #zoomFit (พอดี) keeps the standard .seg button typography */
 .eyebrow{font-family:var(--font-body); font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--violet-adpt); font-weight:700;}
 .spring{flex:1 1 auto;}
 .grow{flex:1 1 auto;}
@@ -384,9 +389,24 @@ button{font-family:inherit; cursor:pointer;}
 #todayLine{position:absolute; top:0; bottom:0; width:2px; background:var(--today); z-index:7; pointer-events:none;}
 #todayFlag{position:absolute; top:0; transform:translateX(-50%); background:var(--today); color:#fff; font-family:var(--mono); font-size:9.5px; font-weight:600; padding:2px 7px; border-radius:0 0 8px 8px; white-space:nowrap; letter-spacing:.04em;}
 #rowsLayer{position:relative; z-index:1;}
-.barRow{position:relative; height:var(--rowH); border-bottom:1px solid var(--line);}
-.barRow.alt{background:rgba(20,22,30,.012);}
-.modBarRow{position:relative; height:var(--modH); border-bottom:1px solid var(--line-strong); background:linear-gradient(180deg,rgba(251,250,255,.6),rgba(244,242,251,.6));}
+/* §1.6 RIGHT-pane stepped shading — the frame-sync guarantee made visible. Each chart row carries the
+   SAME inline --shade as its left twin (renderTimeline sets it via shadeVar(depth), identical to renderGrid).
+   Painted as a background-IMAGE layer so it coexists with the alt-row stripe (background-COLOR below), the
+   weekend bands + grid lines in #gridLayer beneath, and is never wiped by a `background:` shorthand (the
+   Stage-2 G3 landmine). Bars/modBars are absolutely-positioned children → the shade always sits under them.
+   depth 0 ⇒ --shade transparent (falls back to the default) so the gridLayer shows through unchanged. */
+.modBarRow,.barRow{ --shade:transparent; }
+.barRow{position:relative; height:var(--rowH); border-bottom:1px solid var(--line);
+  background-color:transparent;
+  background-image:linear-gradient(var(--shade),var(--shade));
+  background-repeat:no-repeat;}
+.barRow.alt{background-color:rgba(20,22,30,.012);}   /* G3: colour-only (was a `background:` shorthand) so the --shade image layer survives */
+.modBarRow{position:relative; height:var(--modH); border-bottom:1px solid var(--line-strong);
+  background-color:transparent;
+  background-image:
+    linear-gradient(var(--shade),var(--shade)),                                          /* stepped shade (over) */
+    linear-gradient(180deg,rgba(251,250,255,.6),rgba(244,242,251,.6));                    /* base module gradient (under) */
+  background-repeat:no-repeat,no-repeat;}
 .bar{position:absolute; top:7px; height:calc(var(--rowH) - 16px); border-radius:8px; display:flex; align-items:center; padding:0 9px; cursor:grab; user-select:none; touch-action:none; box-shadow:var(--shadow-bar); border:1px solid rgba(0,0,0,.08); overflow:hidden; transition:box-shadow .12s;}
 .bar:hover{box-shadow:0 2px 8px rgba(20,24,40,.22); z-index:4;}
 .bar.dragging{cursor:grabbing; box-shadow:0 6px 18px rgba(20,24,40,.3); z-index:8; transition:none;}
