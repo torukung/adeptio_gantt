@@ -277,25 +277,20 @@ test.describe("F1 — old-tab v1-shape injection is lifted (never mis-classified
   });
 });
 
-/* ===================== dual-write mirror (§2.2) ===================== */
-test.describe("dual-write mirror", () => {
-  test("after a save, each container carries features[] = its DIRECT feature children", async ({ page }) => {
+/* ===================== dual-write mirror — REMOVED in v1.0.5 (spec §2, T-F0) ===================== */
+test.describe("dual-write mirror removed", () => {
+  test("after a save, NO container carries a features[] key (mirror is gone)", async ({ page }) => {
     await openTimeline(page, SEED_B());
-    // force a Store.save() (collapse toggle → apply() → save writes the mirror)
+    // force a Store.save() (collapse toggle → apply() → save; v1.0.4 wrote the mirror here)
     await page.locator('#leftBody .modRow[data-nid="m-alpha"] .caret').click();
     await page.locator('#leftBody .modRow[data-nid="m-alpha"] .caret').click(); // expand back
 
     const doc = await readDoc(page);
-    const check = (id, expected) => {
+    ["m-alpha", "m-a-sub1", "m-beta"].forEach((id) => {
       const n = docFindNode(doc, id);
       expect(n.kind).toBe("container");
-      const direct = (n.children || []).filter((c) => c.kind === "feature").map((c) => c.id);
-      expect((n.features || []).map((f) => f.id), `mirror on ${id}`).toEqual(direct);
-      if (expected) expect((n.features || []).map((f) => f.id)).toEqual(expected);
-    };
-    check("m-alpha", ["fa1", "fa2"]);
-    check("m-a-sub1", ["fs1"]);
-    check("m-beta", ["fb1"]);
+      expect("features" in n, `no mirror key on ${id}`).toBe(false);
+    });
   });
 
   test("load IGNORES the mirror when docVer>=2 (renders from children, not features[])", async ({ page }) => {

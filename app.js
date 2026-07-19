@@ -174,7 +174,7 @@ const Store = {
     migrateDB(DB);                                    // v1.0.4: flat modules+parentId → recursive node tree (idempotent, per project)
     MEM = DB; return DB;
   },
-  save(){ writeMirror(DB); const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); } // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
+  save(){ const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); } // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
 };
 function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
 
@@ -229,7 +229,7 @@ function editingNow(){
   if(el("historyOverlay") && el("historyOverlay").style.display==="flex") return true;
   return false;
 }
-function adoptRemote(doc, rev){ DB=doc; migrateDB(DB); MEM=DB; writeMirror(DB); safeSet(JSON.stringify(DB)); setLsRev(rev); route(); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent)
+function adoptRemote(doc, rev){ DB=doc; migrateDB(DB); MEM=DB; safeSet(JSON.stringify(DB)); setLsRev(rev); route(); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent)
 async function cloudPull(force){
   if(!cloudOn()) return false;
   try{
@@ -1020,19 +1020,10 @@ function normalizeTree(P){
   return P;
 }
 
-/* ---- DUAL-WRITE MIRROR (spec §2.2 — REMOVE IN v1.0.5) --------------------------------
-   On save, every container also writes `features:[its DIRECT feature children]`. It is a
-   MIRROR only — ignored on load when docVer>=2 (we render from children). It lets a still-
-   open v1.0.3 tab that adopts a v2 doc render top-level modules + their direct features
-   instead of a blank board, while its own saves keep `children` intact (v1.0.3 preserves
-   unknown fields). Delete this whole helper + its Store.save()/adoptRemote() calls in v1.0.5. */
-function writeMirror(DB){
-  if(!DB || !Array.isArray(DB.projects)) return;
-  DB.projects.forEach(P=>{
-    if(!P || !Array.isArray(P.modules)) return;
-    (function rec(nodes){ nodes.forEach(n=>{ if(n && n.kind==="container"){ n.features=(n.children||[]).filter(c=>c && c.kind==="feature"); rec(n.children||[]); } }); })(P.modules);
-  });
-}
+/* v1.0.5 F0: the v1.0.4 dual-write `features[]` mirror is GONE (it existed only so a still-open
+   v1.0.3 tab could render a v2 doc during the transition). Stale `features` keys already stored
+   in docs stay inert — the load path ignores them under docVer>=2 and the migration lift still
+   consumes v1-shape docs restored from old backups (spec v1.0.5 §2, N1). */
 
 /* ---- TREE WALK / ADDRESSING (R1) ---- */
 function walkTree(nodes, fn, parent){ (nodes||[]).forEach((n,i)=>{ fn(n,parent||null,i); if(n && n.kind==="container") walkTree(n.children||[], fn, n); }); }
