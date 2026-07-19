@@ -2296,10 +2296,12 @@ const NOTE_HI = "#fff3a8";                       // highlight yellow (N11)
 const NOTE_SECTION_CAP = 20000;                  // stored-html chars per day section
 let notesTab = "business", _notesSaveT = null, _notesCapWarned = false;
 
-/* Sanitizer (N6) — the XSS gate for html round-tripped through the doc/cloud. Runs on SAVE and on RENDER. */
+/* Sanitizer (N6) — the XSS gate for html round-tripped through the doc/cloud. Runs on SAVE and on RENDER.
+   Parses in an INERT DOMParser document: assigning untrusted html to a live-document detached div still
+   starts <img src> fetches and fires their inline onerror DURING sanitization — an adopted hostile doc
+   must never execute anything before the strip. DOMParser documents load nothing and fire no handlers. */
 function sanitizeNoteHtml(html){
-  const box=document.createElement("div");
-  box.innerHTML=String(html==null?"":html);
+  const box=new DOMParser().parseFromString(String(html==null?"":html), "text/html").body;
   (function clean(node){
     [...node.childNodes].forEach(c=>{
       if(c.nodeType===3) return;                                   // text → keep
@@ -2322,7 +2324,7 @@ function sanitizeNoteHtml(html){
   })(box);
   return box.innerHTML;
 }
-function stripNoteText(html){ const d=document.createElement("div"); d.innerHTML=html||""; return (d.textContent||"").trim(); }
+function stripNoteText(html){ return (new DOMParser().parseFromString(String(html||""), "text/html").body.textContent||"").trim(); } // inert parse — counts/badges must never materialize stored html either
 
 /* ---- data accessors ---- */
 function notesOf(pid){
