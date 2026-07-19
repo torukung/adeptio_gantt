@@ -1,5 +1,88 @@
 # Changelog
 
+## v1.0.4 — 2026-07-18 — Multi-level tree, grip menu, continuous zoom & themes
+
+The module structure becomes a full **multi-level tree** — modules nest sub-modules to
+any depth — with a new per-row grip menu, continuous timeline zoom, and Auto/Light/Dark
+themes. Built as four Fable-audited stages on the v1.0.3 baseline; every interaction was
+approved on the prototype first.
+
+### Multi-level tree & data model (core-tree)
+
+- **One recursive node tree.** `P.modules` is now a single container/feature tree — every
+  module can hold sub-modules to unlimited depth, and sub-modules can sit freely between
+  features at any level. The flat `parentId` / array-index model is gone; both panes render
+  from one `flatten()`, so the left grid and the Gantt chart can never drift out of alignment.
+- **Cascade delete.** Deleting a container removes it **and everything inside it**, after an
+  explicit Thai confirm — `ลบ "X" และ N รายการข้างใน?` (N = the count of everything nested
+  under it). Replaces v1.0.3's silent "promote the sub-modules to the top" behaviour.
+- **Every change goes through one gate.** Create, move, edit, delete, promote, indent — all
+  pass through a single mutation gate (normalize → save → render), so no path can leave the
+  tree half-updated. Inline field edits (name / date / status) take a lighter render that keeps
+  your cursor and the cell you are typing in alive.
+
+### Grip menu & tree editing (tree-ui)
+
+- **Grip menu `⠿` on every row** replaces the v1.0.3 hover clusters. It opens only when you
+  point at (or keyboard-focus) the grip — never on plain row hover — and slides open to the
+  right while the row content slides over by the exact pill width, so nothing is ever hidden
+  underneath. Staggered reveal; `Esc` closes it.
+- **Restructure by indent / outdent.** Indent (`⇥`) tucks a row under the container above it;
+  outdent (`⇤`) lifts it to the grandparent level. Depth sets the label: level 0 = Module,
+  deeper = Sub-Module.
+- **Promote / demote, lossless.** Feature ⇆ Sub-Module (`⇄`): promoting a feature keeps all of
+  its fields (start/end/status/owner/remark/custom) dormant, so a later demote restores them
+  unchanged. A container that still has children cannot demote.
+- **One edit modal for any node** — id, type (Feature/Container), name, description, colour, and
+  for features start/end/status/owner/remark. The Type toggle is locked with a Thai hint when
+  the change is illegal, and there is no parent picker any more, so a rename can no longer
+  silently re-home a nested sub-module.
+- **Tree guides + stepped indent shading** in the left grid: a rail + elbow into each child row,
+  and a per-depth violet tint on every row — the same tint appears on the matching chart row.
+
+### Timeline zoom & shading (timeline)
+
+- **Continuous zoom** replaces the fixed Day/Week/Month steps: a smooth px-per-day range driven
+  by a `−  N.N เดือน  +  พอดี` toolbar (the readout shows months in view; **พอดี** fits about
+  9 months). Day / Week / Month stay as one-tap shortcuts. The zoom level is remembered per
+  device — never written into the shared document.
+- **Bar labels adapt to zoom.** Label text shrinks along a curve, and once a bar gets too small
+  or too narrow it collapses to a status dot with the full label on hover. The v1.0.3 sliding
+  sticky labels still work on top of this.
+- **Right-pane stepped shading** now mirrors the left pane exactly on every row — the frame-sync
+  guarantee made visible — and container bars span all of their descendant features at any depth.
+
+### Themes (theme)
+
+- **Auto / Light / Dark** segmented control (`อัตโนมัติ / สว่าง / มืด`) in the project toolbar.
+  Auto follows the operating-system setting and flips live; if the OS flips while you are editing,
+  the redraw waits until you are idle so nothing you are typing is lost.
+- **Dark mode** ships a full dark palette; Light is byte-unchanged from v1.0.3. **PNG export and
+  Print always render on the light ground**, whatever theme is on screen, so shared images and
+  printouts look the same as before. Text contrast was checked against WCAG in-test.
+
+### Migration
+
+- Documents are migrated to **`docVer: 2`** at every load path (local, cloud adopt, restore).
+  Migration is **idempotent** and tree-shape aware, so re-opening or re-adopting a document just
+  re-migrates safely; the old one-level `parentId` structure is preserved (features first, then
+  sub-containers). A stray root-level feature is wrapped into a `(กู้คืน)` recovery container
+  rather than dropped.
+- **Compatibility mirror for open v1.0.3 tabs.** While v1.0.4 rolls out, each container also
+  writes a legacy `features[]` mirror so a still-open v1.0.3 tab renders sanely instead of a blank
+  board; it is ignored on load under `docVer ≥ 2`. **This mirror is temporary — REMOVE IN v1.0.5.**
+- **After deploying, close any old v1.0.3 tabs before editing.** The app pushes the whole document
+  to production on every save (last-write-wins), so a stale open tab could overwrite a migrated
+  document. Closing old tabs first avoids that window (see the merge record / spec §2).
+
+### Testing
+
+- **163 Playwright tests, green ×3 consecutive runs** — the v1.0.3 regression suite ported to the
+  new node addressing, plus new tree, timeline, theme, and migration suites (migration proven on
+  the seed doc, a synthetic `parentId` document, and a copy of a real production snapshot). Every
+  browser context blocks the production Worker host, so no test run can write to production D1 —
+  the standing safety harness. Protected files stay zero-diff.
+
 ## v1.0.3 — Module hierarchy & drag-and-drop
 
 New module-management features (built on top of the integrity fixes above):

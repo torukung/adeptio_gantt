@@ -105,3 +105,93 @@ Full regression (v1.0.3 suite must stay green — sliding labels, fixes, guard) 
 - Migration proven on: seed doc, a real v1.0.2/v1.0.3 production snapshot copy (`Codes Backup/prod_state_snapshot_2026-07-11.json` — READ ONLY, copy it), and a synthetic parentId doc with subs.
 - `git diff` limited to `app.js`, `styles.css`, `CHANGELOG.md`, `docs/**`, `tests/**`, `.gitignore`.
 - Protected files zero-diff. Isolation check CLEAN.
+
+---
+## 7. As-built deltas (2026-07-18)
+
+Honest record of where the shipped build refined or diverged from §1–§6, per stage. Each item
+cites the remark (R#), decision (D#), or audit-gate finding (G#/H#/T#) it answers. Line numbers
+are `app.js` anchors at merge time (approximate — they drift with edits).
+
+### Stage 1 — core-tree (§5.1)
+
+- **Cascade delete shipped in stage 1, not stage 2 (R8 / D1).** The destructive path
+  (`ลบ "X" และ N รายการข้างใน?`, N via `countAll`, ~1512) was gated from the first commit so no
+  intermediate build could delete without a confirm. §5.2's plan implied it with the menu.
+- **`normalizeTree` keeps every good id; re-ids only collisions/blanks (R4 / D5 refinement, ~970).**
+  R4(a) said "dupes re-id'd"; the build preserves the existing uid-minted node id and mints a new
+  one only for a missing or already-`seen` id — untouched nodes never renumber, so promote/demote
+  and cloud round-trips stay stable.
+- **`migrateDoc` autodetects tree shape beyond the `docVer` stamp (~941).** An unstamped but
+  already tree-shaped doc (any `kind`/`children` present — e.g. a new project) is treated as v2 and
+  only sanitized. §2 keyed migration on `docVer` alone.
+- **`apply()` gained a `{fields:true}` light-render path (R2 refinement, audit-added, ~1069).**
+  Non-structural field edits (name/date/status/custom) refresh only the chart + meta + progress and
+  keep `#leftBody` (so the focused editor and its listeners survive); structural mutations still do
+  the full rebuild. R2 defined `apply` as always full-render.
+- **normalizeTree hardened to absorb v1-shaped modules injected through the LWW window (extends §2).**
+  Beyond "re-migrate on adopt", it lifts `features[]→children` and re-homes `parentId`, cycle-guarded,
+  so a stale-tab write mid-flight is repaired rather than merely tolerated.
+- **Container count badge counts descendant features, not direct children (§4 consistency).** The
+  `.count` pill on a container row uses `containerFeatures()` (recursive, any depth, ~1044), matching
+  the recursive stats/range/export walks. v1.0.3 showed the direct-child count only.
+
+### Stage 2 — tree-ui (§5.2)
+
+- **Grip menu REPLACES the v1.0.3 hover clusters (D7).** The change is a swap, not an addition — the
+  old per-row action clusters are removed; the grip pill is the single action surface.
+- **Feature rows restructured with a `.rowMain` cell-strip for the no-overlay rule (G2, ~1223).**
+  §1.1 required "row content slides right, never overlaid" but not the DOM shape; the build wraps the
+  whole cell strip in `.rowMain` and slides that by the measured `--railW`. Column-resize now targets
+  cells inside `.rowMain` (~2029).
+- **Root containers can never demote (G1, audit-hardened, ~1061).** `canDemote` also requires a
+  non-root parent — a root demote would produce an illegal root feature that normalizeTree would wrap
+  into a `(กู้คืน)` recovery container. R5 listed only the has-children guard.
+- **`Esc` closes hover- and focus-opened menus (G4, ~2267).** Added for pointer/keyboard parity; not
+  in §1.1.
+- **Unified node edit modal; create paths stay separate (D8 / D8b).** One modal edits any node;
+  `featureModal`/`moduleModal` are create-only; colour is containers-only (D8b); the modal carries
+  **no parentage control**, so the silent-reparent bug class is structurally impossible — stronger
+  than §1.5's "Type locked while a container has children".
+- **Stepped shading is unbounded inline `shadeVar`; the per-level CSS clamp was dropped (G6a, ~1141).**
+  Shade is emitted per row as `rgba(146,65,255,.03×depth)` inline with no max-level class; hover/drag
+  marks paint `background-color` only so they never wipe the shade layer. (The dark channel is added in
+  stage 4 — below.)
+- **Demote strips `color` (D8b consequence, not an R7 loss, ~1548).** `color` is a container-only
+  attribute, so `demoteCore` deletes it. R7 losslessness covers feature fields (start/end/status/owner/
+  remark/custom), which round-trip byte-identical; colour was never a feature field.
+
+### Stage 3 — timeline (§5.3, §1.6/§1.8/§1.9, R10–R12)
+
+- **`tickMode` crossovers at 18 / 6.2 px-per-day are worker-chosen (~870).** Axis granularity is day
+  ≥18, week ≥6.2, else month. §1.8 fixed the preset PPDs (34/11/4.4) but left the tick knees open.
+- **Cold-start default zoom stays Week (PPD 11), not the 9-month fit (~60).** First load with no
+  persisted `ui.ppd` opens at week-11 (matching the v1.0.3 default view); **พอดี** / reset is the
+  ≈9-month fit, not the initial state. §1.8 defined reset = fit ≈9 months but did not pin the default.
+- **Rendered bar width floors at 2px at extreme zoom-out (H1, ~1296).** Below ~PPD 2 a short bar's
+  `(w−2)` inset went negative → invalid CSS width → the bar auto-inflated to its content. Floored at
+  2px (drag still commits day-deltas, never the pixel width). Not anticipated in §1.9.
+- **The `<34px` label-hide test uses the logical span width, not the visible slice (~1294).**
+  `labelHidden(ppd, w)` reads the full start→end bar width `w`, so a wide bar scrolled partly off-screen
+  keeps its sliding label instead of hiding on the clipped remainder — the correct reading of §1.9 given
+  the R10 sliding-label interplay.
+
+### Stage 4 — theme (§1.10, R11/R12)
+
+- **The DOM `data-theme` attribute is the single render-time authority (T1/T2, ~108).** `domThemeDark()`
+  reads the live attribute; the PNG export and new `beforeprint`/`afterprint` guards force genuinely
+  light **bar fills** (inline `hex2rgba`), not just light tokens — the gap the audit's fill-sampling test
+  caught. §1.10 said "exports force light" without naming the inline-fill hazard.
+- **Auto-mode OS flip defers its re-render behind `editingNow()` (T3, ~95).** The attribute flips
+  instantly for CSS, but the innerHTML rebuild waits until no edit is in flight and then renders once —
+  a mid-edit rebuild would drop uncommitted `contenteditable` text. Not called out in §1.10.
+- **Stepped shading gained a theme channel (completes G6a, ~1141).** `shadeVar` emits both
+  `--shade-l` (.03×depth) and `--shade-d` (rgba(169,112,255,.055×depth)); CSS resolves per theme, so
+  left/right pane parity holds in both themes with no re-render.
+
+### Cross-cutting — test harness
+
+- **FIX3 drag-test flake root-caused at the harness level (no product change).** A late topbar reflow
+  shifted the grid between the coordinate measure and the press, so the press landed on the module grip.
+  Fixed with layout-stability polling + fresh press coordinates + a self-naming guard (first hardened in
+  `5b4c27e`, root-caused and closed in `2ede284`). The drag path itself was verified sound in isolation.
