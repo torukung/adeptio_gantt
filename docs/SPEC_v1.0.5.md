@@ -1,7 +1,7 @@
 # ADEPTIO Gantt v1.0.5 — Architect Spec (Fable)
 
 Branch: `v1.0.5` (from main `fd0008f`, the v1.0.4 merge).
-Prototype (NOTEs popup + timestamps, pending user approval): see `v1.0.5 - Dev/prototype/` in the vault + published artifact link in the session log.
+Prototype (NOTEs popup + timestamps, pending user approval): https://claude.ai/code/artifact/02358dff-84ba-448d-9772-1dcfc59e4eaf (local copy: `v1.0.5 - Dev/prototype/PROTO_v1.0.5_notes_timestamp.html` in the vault).
 Operating model: **Fable** orchestrates / architects / audits / stages; **Opus 4.8 max** workers implement, write, and document; Fable re-tasks on error or stall. Workers never run git — Fable owns commits.
 
 **HARD SAFETY RULES (unchanged, non-negotiable)**
