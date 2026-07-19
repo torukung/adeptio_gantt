@@ -61,12 +61,13 @@ Per `docs/MERGE_RECORD_v1.0.4.md` §"Reminder for v1.0.5" and the `REMOVE IN v1.
 - `editingNow()` must return `true` while `#notesOverlay` is open (add to its overlay checks) so a cloud pull never adopts/re-renders mid-typing. **(N5)**
 - Print: overlay hidden under `@media print`.
 
-### 4.3 Layout
+### 4.3 Layout — TABBED, one section at a time (user revision 2026-07-19, prototype r2)
 Header: `โน้ตโครงการ · <project name>` + auto-save state chip (`กำลังบันทึก… / บันทึกแล้ว ✓`) + `×`.
-Body: two equal columns, thin divider:
-- Left — eyebrow `BUSINESS` · label `โน้ตธุรกิจ`
-- Right — eyebrow `TECHNICAL` · label `โน้ตเทคนิค`
-Each column: sticky mini-toolbar `[B] [I] [A ▾ 6-swatch text-colour palette]` + scrollable section list.
+Below the header, a **tab bar** (pill tabs, active = primary fill):
+- Tab 1 — `ธุรกิจ · BUSINESS (n)` — default active
+- Tab 2 — `เทคนิค · TECHNICAL (n)`
+`(n)` = that tab's non-empty section count, live. Only ONE tab panel is visible/editable at a time; BOTH panels stay mounted in the DOM so switching preserves in-flight edits, and switching flushes any pending auto-save first. (The original two-columns-side-by-side layout was rejected by the user after prototype r1 — it stacked upper/lower on their screen.)
+Each tab panel: sticky mini-toolbar `[B] [I] [• bullets] [6-swatch text-colour palette]` + scrollable section list.
 
 ### 4.4 Date sections ("cut-sectioned line by date")
 - A column's content = array of day sections, rendered **newest-first**, each: dashed divider line with a centred date chip (`— 19/07/2026 —`) followed by that day's contenteditable region.
@@ -74,8 +75,8 @@ Each column: sticky mini-toolbar `[B] [I] [A ▾ 6-swatch text-colour palette]` 
 - Empty sections (all content deleted) are pruned on save.
 
 ### 4.5 Rich text + safety
-- `contenteditable` regions; toolbar drives `document.execCommand('bold' | 'italic' | 'foreColor')` on the focused section (deprecated-but-universal; acceptable for this scope — wrap in a tiny `fmt()` helper so a future Selection-API swap is one function).
-- **Sanitizer (mandatory, both on save and on render of stored html):** whitelist tags `B STRONG I EM SPAN DIV P BR FONT`, attributes only `style="color:…"` / `color`; strip everything else (tags unwrapped to text, `script/style/iframe` dropped entirely). This is the XSS gate for html round-tripped through the doc/cloud. **(N6)**
+- `contenteditable` regions; toolbar drives `document.execCommand('bold' | 'italic' | 'insertUnorderedList' | 'foreColor')` on the focused section (deprecated-but-universal; acceptable for this scope — wrap in a tiny `fmt()` helper so a future Selection-API swap is one function). Bullets render as `ul { padding-left:22px }` / `li { margin:2px 0 }` inside the note region.
+- **Sanitizer (mandatory, both on save and on render of stored html):** whitelist tags `B STRONG I EM SPAN DIV P BR FONT UL LI`, attributes only `style="color:…"` / `color`; strip everything else (tags unwrapped to text, `script/style/iframe` dropped entirely). This is the XSS gate for html round-tripped through the doc/cloud. **(N6)**
 - Paste is forced to plain text (`insertText`).
 - Per-section stored-html cap 20,000 chars — over-cap saves are trimmed with a one-time toast warning.
 
@@ -106,8 +107,8 @@ DB.notes = {
 4. **T-F1c** `fmtStamp` renders date-only legacy values without `NaN`/time garbage.
 5. **T-F2a** open/close popup via button, Esc, backdrop; `editingNow()` true while open.
 6. **T-F2b** typing → after debounce, localStorage doc has `DB.notes[pid].business[0]` with today's date; reload → persists; count badge updates.
-7. **T-F2c** bold/italic/colour round-trip; injected `<script>`/`<img onerror>` stripped by sanitizer on save AND on render.
-8. **T-F2d** two columns independent; one date divider per day per column; empty section pruned.
+7. **T-F2c** bold/italic/bullets/colour round-trip (bullets → `ul>li` kept by sanitizer, attrs stripped); injected `<script>`/`<img onerror>` stripped by sanitizer on save AND on render.
+8. **T-F2d** tabs: business default; switching shows exactly one panel, preserves the other panel's unsaved edit (pending save flushed on switch), per-tab counts correct; one date divider per day per tab; empty section pruned.
 9. **T-F2e** project delete prunes its notes; `migrateDB` creates `DB.notes` on old docs.
 10. **T-SAFE** zero requests to the prod Worker host (existing fixture assertion, re-affirmed).
 
