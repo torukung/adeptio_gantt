@@ -49,6 +49,18 @@ function daysBetween(a,b){ return Math.round((parse(b)-parse(a))/DAY); }
 function startOfMonth(d){ return new Date(d.getFullYear(),d.getMonth(),1); }
 function endOfMonth(d){ return new Date(d.getFullYear(),d.getMonth()+1,0); }
 function today(){ const t=new Date(); return new Date(t.getFullYear(),t.getMonth(),t.getDate()); }
+function nowIso(){ return new Date().toISOString(); }  // v1.0.5 F1: full datetime for last-edit stamps
+/* v1.0.5 F1: render a last-edit stamp. Tolerates BOTH shapes in stored docs — legacy date-only
+   "YYYY-MM-DD" (v1.0.4 and earlier wrote these; a stale tab may still write one during the LWW
+   window) renders date-only; full ISO renders "DD/MM/YYYY HH:mm" in LOCAL time (spec §3, N3). */
+function fmtStamp(s){
+  if(!s) return "";
+  const str=String(s);
+  if(/^\d{4}-\d{2}-\d{2}$/.test(str)){ const p=str.split("-"); return p[2]+"/"+p[1]+"/"+p[0]; }
+  const d=new Date(str); if(isNaN(d)) return "";
+  const p2=n=>String(n).padStart(2,"0");
+  return p2(d.getDate())+"/"+p2(d.getMonth()+1)+"/"+d.getFullYear()+" "+p2(d.getHours())+":"+p2(d.getMinutes());
+}
 const LS_UI = "adeptio_ptrack_ui";
 /* v1.0.4 §1.8 / R12 — continuous Gantt zoom: px-per-day (PPD) ∈ [0.9,34], persisted per-device in
    `ui` (LS_UI), NEVER in the doc. The three legacy day/week/month presets survive only as shortcuts
@@ -174,9 +186,26 @@ const Store = {
     migrateDB(DB);                                    // v1.0.4: flat modules+parentId → recursive node tree (idempotent, per project)
     MEM = DB; return DB;
   },
-  save(){ const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); } // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
+  save(){
+    /* v1.0.5 F1 (N2): the ONE stamping point — every doc mutation funnels through here, so
+       "any information edit/change" gets a last-edit datetime with zero per-call-site edits.
+       PID is null on the dashboard (route() clears it), so an open project is never mis-stamped
+       by dashboard-level saves; the project modal stamps its own target explicitly. */
+    DB.updatedAt = nowIso();
+    const P0 = PID ? proj() : null; if(P0) P0.updatedAt = nowIso();
+    const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
+    refreshStamps();
+  }
 };
 function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
+/* v1.0.5 F1: LIGHT stamp refresh — updates the Project Status header stamp in place after a save
+   (blur-saves and autosaves don't re-render, so the element must be touched directly). Never a
+   re-render: typing mid-edit must not lose focus/selection. */
+function refreshStamps(){
+  const s=el("statusStamp"); if(!s) return;
+  const P = PID ? proj() : null;
+  if(P && P.updatedAt) s.textContent = "แก้ไขล่าสุด " + fmtStamp(P.updatedAt);
+}
 
 /* ---- cloud sync engine: local-first; the Worker's `rev` is the tiebreaker ---- */
 let pushTimer=null, pushPending=false, pushFails=0;
@@ -435,6 +464,7 @@ function renderDashboard(){
         <h3>${esc(p.name)}</h3>
         <div class="stat"><span><b>${p.modules.length}</b> โมดูล</span><span><b>${nFeat}</b> ฟีเจอร์</span><span class="mono">${range}</span></div>
         ${cur ? `<div class="sumline"><div class="sumdate mono">อัปเดต ${esc(cur.date)}</div>${esc((cur.text||"").slice(0,150))}</div>` : ""}
+        ${p.updatedAt ? `<div class="lastEdit mono">แก้ไขล่าสุด ${esc(fmtStamp(p.updatedAt))}</div>` : ""}
       </div>
       <div class="cardProg">
         <div class="cp-top"><span class="cp-lab">ความคืบหน้า</span><span class="grow"></span><span class="cp-pct mono">เสร็จ ${agg.donePct}% · ทำอยู่ ${agg.startedPct}%</span></div>
@@ -506,11 +536,11 @@ function projectModal(id){
   el("modalRoot").querySelectorAll('#pm_sw .swatch').forEach(s=> s.onclick=()=>{ color=+s.dataset.c; el("modalRoot").querySelectorAll('#pm_sw .swatch').forEach(x=>x.classList.toggle('on',x===s)); });
   el("pm_save").onclick = ()=>{
     const name=el("pm_name").value.trim()||"โครงการใหม่", client=el("pm_client").value.trim(), code=el("pm_code").value.trim();
-    if(editing){ editing.name=name; editing.client=client; editing.code=code; editing.color=color; editing.updatedAt=iso(today()); }
+    if(editing){ editing.name=name; editing.client=client; editing.code=code; editing.color=color; editing.updatedAt=nowIso(); } // v1.0.5 F1: PID is null on the dashboard, so this modal stamps its own target
     else {
       const slug=(code||name).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")||("proj-"+_seq);
       let pid=slug, n=2; while(DB.projects.some(p=>p.id===pid)){ pid=slug+"-"+n; n++; }
-      DB.projects.push({ id:pid, name, client, code, color, createdAt:iso(today()), updatedAt:iso(today()),
+      DB.projects.push({ id:pid, name, client, code, color, createdAt:iso(today()), updatedAt:nowIso(),
         customCols:[], progressOrder:[], summary:{current:{id:nid(),date:iso(today()),text:""},history:[]}, modules:[], docVer:2 }); // v1.0.4: new projects are already tree-shaped
     }
     Store.save(); closeModal(); renderDashboard(); toast(editing?"บันทึกแล้ว":"สร้างโครงการแล้ว");
@@ -688,6 +718,7 @@ function renderSummary(){
         <span class="sumDateWrap">วันที่อัปเดต <input type="date" id="sumDate" value="${esc(cur.date||iso(today()))}"/></span>
         <button class="btn sm" id="goTimeline" title="ไปหน้าไทม์ไลน์และ Gantt">ไทม์ไลน์โครงการ ${IC.arrow}</button>
       </div>
+      <div class="sumStamp mono" id="statusStamp">${P.updatedAt ? "แก้ไขล่าสุด "+esc(fmtStamp(P.updatedAt)) : ""}</div>
       <textarea id="sumText" maxlength="1000" placeholder="พิมพ์สรุปสถานะล่าสุด (สูงสุด 1,000 ตัวอักษร)…">${esc(cur.text||"")}</textarea>
       <div class="sumMeta">
         <span class="counter" id="sumCount"></span>
@@ -702,7 +733,7 @@ function renderSummary(){
   const upd=()=>{ ctr.textContent=ta.value.length+" / 1000"; ctr.classList.toggle('warn', ta.value.length>=950); };
   upd(); ta.oninput=upd;
   ta.onblur = ()=>{ if(cur.text!==ta.value){ cur.text=ta.value; Store.save(); } }; // FIX: persist unsaved summary text on blur (no toast) so navigation never drops it
-  el("sumSave").onclick = ()=>{ cur.text=ta.value; cur.date=el("sumDate").value||cur.date; P.updatedAt=iso(today()); Store.save(); toast("บันทึกสรุปแล้ว"); };
+  el("sumSave").onclick = ()=>{ cur.text=ta.value; cur.date=el("sumDate").value||cur.date; Store.save(); toast("บันทึกสรุปแล้ว"); }; // v1.0.5 F1: manual date-only stamp dropped — Store.save() stamps centrally
   el("sumDate").onchange = ()=>{ cur.date=el("sumDate").value; Store.save(); };
   el("sumNew").onclick = ()=>{
     cur.text=ta.value; cur.date=el("sumDate").value||cur.date;
