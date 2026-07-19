@@ -73,10 +73,12 @@ Each tab panel: sticky mini-toolbar `[B] [I] [• bullets] [6-swatch text-colour
 - A column's content = array of day sections, rendered **newest-first**, each: dashed divider line with a centred date chip (`— 19/07/2026 —`) followed by that day's contenteditable region.
 - Today's section is created lazily on the **first keystroke** of the day (no empty-section litter on open). Older sections stay editable in place; editing any section stamps F1 timestamps as usual.
 - Empty sections (all content deleted) are pruned on save.
+- **Section delete + action log (user revision r3, 2026-07-19):** every date divider carries a **bin button** behind the date chip (subtle at rest, red when armed). Two-click arm-confirm — first click arms for ~2.6s with a toast, second click deletes the WHOLE day section including the divider ("delete all evidences"; today's section clears content and re-hides its divider). No native confirm() dialogs. Each deletion appends `{ts: ISO, action:'delete', col, date}` to the project's notes **log** (cap 200, trim oldest). The log is viewable via a `log (n)` chip in the popup header that toggles a compact mono strip (`19/07/2026 13:27 · ลบโน้ตธุรกิจ 15/07/2026`); log entries are NOT removable from the UI. **(N10)**
 
 ### 4.5 Rich text + safety
 - `contenteditable` regions; toolbar drives `document.execCommand('bold' | 'italic' | 'insertUnorderedList' | 'foreColor')` on the focused section (deprecated-but-universal; acceptable for this scope — wrap in a tiny `fmt()` helper so a future Selection-API swap is one function). Bullets render as `ul { padding-left:22px }` / `li { margin:2px 0 }` inside the note region.
-- **Sanitizer (mandatory, both on save and on render of stored html):** whitelist tags `B STRONG I EM SPAN DIV P BR FONT UL LI`, attributes only `style="color:…"` / `color`; strip everything else (tags unwrapped to text, `script/style/iframe` dropped entirely). This is the XSS gate for html round-tripped through the doc/cloud. **(N6)**
+- **Highlight (user revision r3):** toolbar marker button applies light-yellow `#fff3a8` via `hiliteColor`. Toggle-off must NOT use `hiliteColor 'transparent'` (nests a see-through span over the yellow one — verified failure in the prototype); instead detect highlighted state by DOM inspection (any intersecting element with a background) and strip `background-color` from every element the selection touches, whole-run. Dark theme forces readable dark ink on highlighted runs (`html[data-theme="dark"]` rule matching the highlight colour). **(N11)**
+- **Sanitizer (mandatory, both on save and on render of stored html):** whitelist tags `B STRONG I EM SPAN DIV P BR FONT UL LI`, attributes only `style="color:…"` / `style="background-color:…"` (highlight; drop `transparent` leftovers) / `color`; strip everything else (tags unwrapped to text, `script/style/iframe` dropped entirely). This is the XSS gate for html round-tripped through the doc/cloud. **(N6)**
 - Paste is forced to plain text (`insertText`).
 - Per-section stored-html cap 20,000 chars — over-cap saves are trimmed with a one-time toast warning.
 
@@ -89,7 +91,8 @@ Each tab panel: sticky mini-toolbar `[B] [I] [• bullets] [6-swatch text-colour
 DB.notes = {
   [projectId]: {
     business:  [{ date:"YYYY-MM-DD", html:"…" }],   // newest-first
-    technical: [{ date:"YYYY-MM-DD", html:"…" }]
+    technical: [{ date:"YYYY-MM-DD", html:"…" }],
+    log:       [{ ts:"ISO", action:"delete", col:"business|technical", date:"YYYY-MM-DD" }]  // newest-first, cap 200
   }
 }
 ```
@@ -110,7 +113,9 @@ DB.notes = {
 7. **T-F2c** bold/italic/bullets/colour round-trip (bullets → `ul>li` kept by sanitizer, attrs stripped); injected `<script>`/`<img onerror>` stripped by sanitizer on save AND on render.
 8. **T-F2d** tabs: business default; switching shows exactly one panel, preserves the other panel's unsaved edit (pending save flushed on switch), per-tab counts correct; one date divider per day per tab; empty section pruned.
 9. **T-F2e** project delete prunes its notes; `migrateDB` creates `DB.notes` on old docs.
-10. **T-SAFE** zero requests to the prod Worker host (existing fixture assertion, re-affirmed).
+10. **T-F2f** section delete: first bin click arms (no delete), auto-disarms ~2.6s; second click removes divider + content, appends a log entry, persists (reload: section gone, log kept); today-section delete clears + re-hides divider, typing again re-creates.
+11. **T-F2g** highlight: apply → yellow span survives sanitize; toggle-off with full-selection AND caret-inside both remove it (no nested-transparent-span failure); dark theme renders highlighted text in dark ink.
+12. **T-SAFE** zero requests to the prod Worker host (existing fixture assertion, re-affirmed).
 
 ---
 ## 6. Delivery — audited commits on `v1.0.5`
