@@ -439,7 +439,7 @@ function openProjectWindow(id){
 }
 function route(){
   const {pid, view} = readRoute();
-  closeModal(); hideHistory();
+  closeModal(); hideHistory(); notesHardClose();     // v1.0.5 F2 audit fix: flush+close notes BEFORE PID changes (see notesHardClose)
   if(pid && DB.projects.some(p=>p.id===pid)){
     PID = pid; renderProject();
     if(view==="history") showHistory();
@@ -719,7 +719,7 @@ function renderSummary(){
         <span class="lab">สรุปสถานะโครงการ</span>
         <span class="grow"></span>
         <span class="sumDateWrap">วันที่อัปเดต <input type="date" id="sumDate" value="${esc(cur.date||iso(today()))}"/></span>
-        <button class="btn sm" id="sumNotes" title="โน้ตโครงการ (ธุรกิจ / เทคนิค)">${IC.note}<span>โน้ต (<span id="sumNotesCount">${notesCount(P.id)}</span>)</span></button>
+        <button class="btn sm" id="sumNotes" title="โน้ตโครงการ (ธุรกิจ / เทคนิค)">${IC.note}<span>โน้ต<span id="sumNotesBadge"${notesCount(P.id)?"":' style="display:none"'}> (<span id="sumNotesCount">${notesCount(P.id)}</span>)</span></span></button>
         <button class="btn sm" id="goTimeline" title="ไปหน้าไทม์ไลน์และ Gantt">ไทม์ไลน์โครงการ ${IC.arrow}</button>
       </div>
       <div class="sumStamp mono" id="statusStamp">${P.updatedAt ? "แก้ไขล่าสุด "+esc(fmtStamp(P.updatedAt)) : ""}</div>
@@ -2368,7 +2368,9 @@ function notesChip(state){
   else { c.textContent="บันทึกแล้ว ✓"; c.className="saveChip saved"; }
 }
 function notesSyncCounts(){
-  const badge=el("sumNotesCount"); if(badge && PID) badge.textContent=notesCount(PID);
+  if(PID){ const cnt=notesCount(PID), num=el("sumNotesCount"), wrap=el("sumNotesBadge");
+    if(num) num.textContent=cnt;
+    if(wrap) wrap.style.display=cnt?"":"none"; }     // spec §4.1: badge only when notes exist — never "โน้ต (0)"
   const n=PID?notesOf(PID):null; if(!n) return;
   const c=a=>a.filter(s=>s && stripNoteText(s.html).length).length;
   const liveCol=col=>{ let k=0; document.querySelectorAll('#notesOverlay .noteEdit[data-col="'+col+'"]').forEach(ed=>{ if((ed.textContent||"").trim()) k++; }); return k; };
@@ -2434,6 +2436,15 @@ function closeNotes(){
   setTimeout(()=>{ ov.style.display="none"; ov.innerHTML=""; }, 180);
   notesSyncCounts();
 }
+/* AUDIT FIX (major): route() knew nothing about the body-level overlay — browser Back/Forward while
+   the popup was open orphaned it, dropped the pending debounce (PID already null), or worse flushed
+   THIS project's DOM into the project the hash moved to. Called by route() BEFORE PID is reassigned,
+   so the flush lands under the project the notes belong to; teardown is instant (no animation). */
+function notesHardClose(){
+  if(!notesOpen()) return;
+  if(_notesSaveT) notesFlush();
+  const ov=el("notesOverlay"); ov.classList.remove("open"); ov.style.display="none"; ov.innerHTML="";
+}
 function notesSwitchTab(col){
   if(col===notesTab) return;
   if(_notesSaveT) notesFlush();                     // pending edit flushes BEFORE the other panel shows
@@ -2476,13 +2487,23 @@ function notesUiColumn(col, eyebrow, label, arr){
   const scroll=document.createElement("div"); scroll.className="colScroll";
   scroll.appendChild(notesUiToolbar());
   const tIso=iso(today());
-  const tEntry=arr.find(s=> s && s.date===tIso), tHtml=tEntry?tEntry.html:"";                    // seed a stored today section into the lazy region (never render today twice)
+  /* AUDIT FIX: flush() replaces the stored arrays with whatever the DOM holds, so EVERY stored
+     section must render or it is silently deleted on the first autosave. Merge duplicates by date
+     (join with <br>) and fold date-less/malformed strays into today — never drop content. */
+  const byDate=new Map();
+  arr.forEach(s=>{
+    if(!s) return;
+    const d=(s.date && /^\d{4}-\d{2}-\d{2}$/.test(String(s.date))) ? s.date : tIso;
+    const h=s.html||"";
+    if(!byDate.has(d)) byDate.set(d, h);
+    else if(stripNoteText(h).length) byDate.set(d, byDate.get(d) + (stripNoteText(byDate.get(d)).length?"<br>":"") + h);
+  });
+  const tHtml=byDate.get(tIso)||""; byDate.delete(tIso);
   const tDiv=notesUiDivider(col, tIso, true); tDiv.hidden = stripNoteText(tHtml).length===0;      // today divider hidden until there is content
   scroll.appendChild(tDiv);
   scroll.appendChild(notesUiEditor(col, tIso, tHtml, true));
-  arr.filter(s=> s && s.date && s.date!==tIso)
-     .sort((a,b)=> a.date<b.date?1:(a.date>b.date?-1:0))                                          // newest-first
-     .forEach(s=>{ scroll.appendChild(notesUiDivider(col, s.date, false)); scroll.appendChild(notesUiEditor(col, s.date, s.html, false)); });
+  [...byDate.keys()].sort().reverse()                                                             // newest-first
+     .forEach(d=>{ scroll.appendChild(notesUiDivider(col, d, false)); scroll.appendChild(notesUiEditor(col, d, byDate.get(d), false)); });
   wrap.appendChild(scroll);
   return wrap;
 }
@@ -2552,8 +2573,17 @@ function notesUiPastePlain(e){                                                  
   const t=(e.clipboardData||window.clipboardData).getData("text/plain");
   document.execCommand("insertText", false, t);
 }
-function notesUiFmt(cmd){ document.execCommand(cmd, false, null); notesMarkDirty(); }
-function notesUiColor(val){ try{ document.execCommand("styleWithCSS", false, true); }catch(e){} document.execCommand("foreColor", false, val); notesMarkDirty(); }
+/* AUDIT FIX (major): styleWithCSS is a DOCUMENT-GLOBAL, session-persistent execCommand mode. Setting
+   it for colour/highlight and never restoring it made every later bold/italic emit style-spans whose
+   font-weight/font-style the sanitizer strips — silently losing emphasis after the first colour use.
+   Every command goes through this wrapper, which ALWAYS restores the flag to false. */
+function notesUiExec(cmd, val, styleWithCss){
+  try{ document.execCommand("styleWithCSS", false, !!styleWithCss); }catch(e){}
+  document.execCommand(cmd, false, val==null?null:val);
+  try{ document.execCommand("styleWithCSS", false, false); }catch(e){}
+}
+function notesUiFmt(cmd){ notesUiExec(cmd, null, false); notesMarkDirty(); }
+function notesUiColor(val){ notesUiExec("foreColor", val, true); notesMarkDirty(); }
 function notesUiHighlight(){                                                                        // N11: detect highlighted state by DOM inspection (queryCommandValue is unreliable across the wrapping span)
   const sel=window.getSelection(); if(!sel || !sel.rangeCount) return;
   const range=sel.getRangeAt(0);
@@ -2562,7 +2592,7 @@ function notesUiHighlight(){                                                    
   const hits=[...scope.querySelectorAll('[style*="background"]')].filter(n=> range.intersectsNode(n));
   const ancsWithBg=[];
   for(let p=anc; p && p!==scope.parentElement; p=p.parentElement){ if(p.style && p.style.backgroundColor) ancsWithBg.push(p); if(p===scope) break; }
-  if(!hits.length && !ancsWithBg.length){ try{ document.execCommand("styleWithCSS", false, true); }catch(e){} document.execCommand("hiliteColor", false, NOTE_HI); }  // apply
+  if(!hits.length && !ancsWithBg.length){ notesUiExec("hiliteColor", NOTE_HI, true); }  // apply (wrapper restores styleWithCSS)
   else { hits.forEach(n=> n.style.backgroundColor=""); ancsWithBg.forEach(n=> n.style.backgroundColor=""); }                                                             // whole-run removal (no partial splits)
   notesMarkDirty();
 }

@@ -199,8 +199,10 @@ test.describe("T-F2d — tabs: one panel at a time, unsaved edit survives a swit
     await expect(page.locator(TECH)).toBeVisible();
     await expect(page.locator(BIZ)).toBeHidden();
 
-    // flush-on-switch already persisted the business edit
-    await expect.poll(() => storedHtml(page, "business", tIso)).toContain("biz text one");
+    // flush-on-switch persisted the business edit SYNCHRONOUSLY — assert well inside the 600ms
+    // debounce window, so a still-pending debounce can never mask a removed flush-on-switch
+    // (audit finding: the default 5s poll let the debounce fire and fake a pass).
+    await expect.poll(() => storedHtml(page, "business", tIso), { timeout: 250 }).toContain("biz text one");
 
     // type in technical, switch back
     await typeInto(page, TECH_TODAY, "tech text two");
@@ -218,6 +220,30 @@ test.describe("T-F2d — tabs: one panel at a time, unsaved edit survives a swit
     // exactly one date divider per day per tab (today's, now revealed by content)
     expect(await page.locator(BIZ + ' .dateDiv[data-date="' + tIso + '"]').count()).toBe(1);
     expect(await page.locator(TECH + ' .dateDiv[data-date="' + tIso + '"]').count()).toBe(1);
+  });
+
+  test("T-F2d2 emptying a stored past section prunes it from DB.notes on the next autosave (spec §5.8)", async ({ page }) => {
+    await openProject(page, docWithNotes({
+      "test-proj": { business: [{ date: "2026-07-10", html: "โน้ตเก่าที่จะถูกลบ" }], technical: [], log: [] },
+    }));
+    await openNotes(page);
+    const OLD = BIZ + ' .noteEdit[data-date="2026-07-10"]';
+    await expect(page.locator(OLD)).toContainText("โน้ตเก่าที่จะถูกลบ");
+
+    // empty the section by editing (NOT the bin): select all + delete, let the debounce flush
+    await selectAll(page, OLD);
+    await page.locator(OLD).press("Backspace");
+    await expect.poll(() => storedHtml(page, "business", "2026-07-10")).toBe("");
+    const doc = await readDoc(page);
+    expect((doc.notes["test-proj"].business || []).some((s) => s && s.date === "2026-07-10"),
+      "emptied section pruned from storage").toBe(false);
+    expect(doc.notes["test-proj"].log.length, "editing-empty is a prune, not a logged delete").toBe(0);
+
+    // reload → the pruned section does not come back
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator("#proj").waitFor({ state: "attached" });
+    await openNotes(page);
+    expect(await page.locator(BIZ + ' .dateDiv[data-date="2026-07-10"]').count()).toBe(0);
   });
 });
 

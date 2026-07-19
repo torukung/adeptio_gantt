@@ -736,15 +736,15 @@ html[data-theme="dark"] #notesOverlay{--nctl:#242231; --nctl-hi:#2e2b3c;}
 #notesOverlay .saveChip{font-family:var(--mono); font-size:11px; padding:4px 11px; border-radius:var(--r-pill); border:1px solid var(--line-strong); color:var(--ink-soft);}
 #notesOverlay .saveChip.saved{color:var(--good); border-color:var(--good);}
 #notesOverlay .logChip{font-family:var(--mono); font-size:11px; padding:4px 11px; border-radius:var(--r-pill); border:1px solid var(--line-strong); background:transparent; color:var(--ink-faint); cursor:pointer; transition:.15s var(--ease);}
-#notesOverlay .logChip:hover{color:var(--ink); border-color:var(--ink);}
+#notesOverlay .logChip:hover{color:var(--ink); border-color:var(--ink); background:var(--nctl-hi);}
 #notesOverlay .closeX{margin-left:auto; width:32px; height:32px; border:1px solid var(--line-strong); border-radius:50%; background:var(--nctl); color:var(--ink-soft); cursor:pointer; display:inline-flex; align-items:center; justify-content:center; transition:.15s var(--ease);}
-#notesOverlay .closeX:hover{color:var(--ink); border-color:var(--ink);}
+#notesOverlay .closeX:hover{color:var(--ink); border-color:var(--ink); background:var(--nctl-hi);}
 #notesOverlay .closeX svg{width:15px; height:15px;}
 
 /* tab bar — one section at a time (active = primary fill), scoped so it does not touch the project tabs */
 #notesOverlay .tabBar{display:flex; gap:8px; padding:12px 20px 0; flex:0 0 auto;}
 #notesOverlay .tabBtn{display:inline-flex; align-items:center; gap:7px; height:34px; padding:0 16px; cursor:pointer; border:1px solid var(--line-strong); border-radius:var(--r-pill); background:var(--nctl); color:var(--ink-soft); font-family:var(--font-body); font-size:12.5px; font-weight:600; transition:.15s var(--ease);}
-#notesOverlay .tabBtn:hover{color:var(--ink); border-color:var(--ink);}
+#notesOverlay .tabBtn:hover{color:var(--ink); border-color:var(--ink); background:var(--nctl-hi);}
 #notesOverlay .tabBtn.on{background:var(--primary); border-color:var(--primary); color:#fff;}
 #notesOverlay .tabCount{font-family:var(--mono); font-size:11px; opacity:.75;}
 
@@ -763,7 +763,7 @@ html[data-theme="dark"] #notesOverlay{--nctl:#242231; --nctl-hi:#2e2b3c;}
 /* sticky mini-toolbar: B / I / bullets / highlight | 6 colour swatches */
 #notesOverlay .colToolbar{position:sticky; top:0; z-index:2; display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 0 9px; margin-bottom:2px; background:var(--panel); border-bottom:1px solid var(--line);}
 #notesOverlay .fmtBtn{width:28px; height:28px; border:1px solid var(--line-strong); border-radius:8px; background:var(--nctl); color:var(--ink); cursor:pointer; font-size:13px; display:inline-flex; align-items:center; justify-content:center; transition:.15s var(--ease);}
-#notesOverlay .fmtBtn:hover{border-color:var(--ink);}
+#notesOverlay .fmtBtn:hover{border-color:var(--ink); background:var(--nctl-hi);}
 #notesOverlay .swatchRow{display:flex; gap:7px; align-items:center; padding-left:8px; margin-left:2px; border-left:1px solid var(--line);}
 #notesOverlay .swatch{width:16px; height:16px; padding:0; border-radius:50%; border:1px solid var(--line-strong); cursor:pointer; transition:.12s var(--ease);}
 #notesOverlay .swatch:hover{transform:scale(1.15);}
