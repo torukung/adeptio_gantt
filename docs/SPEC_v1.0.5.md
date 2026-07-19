@@ -127,3 +127,48 @@ DB.notes = {
 5. `docs + tests`: CHANGELOG, as-built spec deltas, `MERGE_RECORD_v1.0.5.md` (must repeat the CLOSE-OLD-TABS ritual and the pre-merge manual D1 snapshot step).
 
 Each code commit: Opus-max worker implements → adversarial audit (spec/refute/safety/tests/style lenses) → fix worker → Fable reads the diff, runs the suite, commits. Merge to main only on the user's explicit "merge now".
+
+---
+## Appendix A — As-built deltas (2026-07-19)
+
+Intentional divergences between this spec and the shipped code (`app.js`, `styles.css`), found or
+decided during implementation and audit.
+
+**(a) Today editor carries `data-date` in addition to `data-today`.** §4.4/§4.7 describe the today
+section as a lazily-created special case; the prototype special-cased it in the collection logic too.
+The as-built `notesUiEditor()` sets `data-date="<iso(today())>"` on the today editor **in addition to**
+`data-today="1"` — every `.noteEdit`, today or not, carries `data-date`. `collectNotesFromDom()`
+collects purely by `data-date`, with no separate today branch. One code path for all sections; the
+today region is distinguished only by the `data-today` flag (lazy-reveal of its divider) and the
+`.today` CSS class (dashed border), never by a different collection rule.
+
+**(b) `.noteCol` / `.noteColHead` replace the prototype's `.col` / `.colHead`.** The app already uses
+`.colHead` for the left-grid column headers, and `.colHead` is a member of `_DRAG_SEL`
+(`'.bar,.grip,.colHead,.colResize,#splitter,.pgrip,.modGrip'`) — the centralized drag guard that
+latches `_dragging` on `pointerdown`. Reusing `.colHead` inside the notes popup would have made every
+pointerdown in a notes column header falsely arm the drag guard, and `.col` collides with other
+generic class names elsewhere in the app. All notes markup uses `.noteCol` / `.noteColHead` instead,
+and — belt and suspenders — every notes selector in `styles.css` is scoped under `#notesOverlay` so
+none of it can collide with `.tabBtn`, `.swatch`, `.colHead`, or any other shared class name used
+elsewhere in the app. Notes-local surface tokens are scoped `--nctl` / `--nctl-hi` (not the app's
+`--ctl`, which the light theme doesn't define) for the same reason.
+
+**(c) Sanitizer parses in an inert `DOMParser` document, not a live-document detached `div`.** §4.5/N6
+specifies a whitelist sanitizer; the hardening beyond N6 was found via test T-F2c during the final
+commit. Assigning untrusted HTML to a detached `div` created in the live `document` still runs it:
+`<img src="x">` starts a network fetch and its inline `onerror` handler fires *during* the sanitize
+pass, before the whitelist strip removes the attribute. `sanitizeNoteHtml()` and `stripNoteText()`
+instead parse via `new DOMParser().parseFromString(html, "text/html")` — a DOMParser document loads no
+subresources and fires no handlers — so nothing executes before the strip runs, on save or on render.
+
+**(d) `#notesOverlay` z-index is 90.** Between `#historyOverlay` (85) and `#toast` (95): the notes
+popup must sit above the history overlay (both are full-screen modal-style overlays; notes should win
+if both are somehow triggered) but never obscure a toast notification, which must always be visible
+on top of any open surface.
+
+**(e) Log chip renders `log (n)`; log strip toggles below the tab bar.** §4.4/N10 specifies a
+`log (n)` chip that "toggles a compact mono strip." As built, the chip lives in the popup header
+(`#notesLogChip`, next to the save-state chip and the close button) and reads literally `log (<n>)`
+with `<n>` = `DB.notes[pid].log.length`. Clicking it toggles `.logStrip.open`; the strip element sits
+in the DOM between the tab bar and the tab panels, so when open it pushes the panels down rather than
+overlaying them. Entries render newest-first, one per line, `DD/MM/YYYY HH:mm · ลบโน้ต<ธุรกิจ|เทคนิค> DD/MM/YYYY`.

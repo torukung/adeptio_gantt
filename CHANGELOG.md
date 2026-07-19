@@ -1,5 +1,82 @@
 # Changelog
 
+## v1.0.5 — 2026-07-19 — Last-edit timestamps, Project NOTEs, mirror removal
+
+A fix-first minor release: the v1.0.4 compatibility mirror is retired, every doc mutation now
+stamps a last-edit datetime, and projects gain a tabbed NOTEs popup for running business/technical
+commentary. Spec revised four times on user feedback before the UI commit landed; every interaction
+was approved on the prototype first.
+
+### Fix — dual-write mirror removed (F0)
+
+- **`features[]` compatibility mirror deleted.** The v1.0.4 transition shim — every container
+  writing a legacy `features[]` array alongside `children` so a stale open v1.0.3 tab could still
+  render — is gone (`writeMirror()` and its two call sites in `Store.save()` / `adoptRemote()`).
+  Stale `features` keys already sitting in stored docs are left inert (ignored on load under
+  `docVer ≥ 2`); the v1→v2 migration read-path is untouched, so a pre-v1.0.4 backup still migrates.
+
+### Feature — last-edit timestamps, แก้ไขล่าสุด (F1)
+
+- **One central stamping point.** `Store.save()` now stamps `DB.updatedAt` and the open project's
+  `updatedAt` with a full ISO datetime on every doc mutation, so "any information edit/change" is
+  covered with zero per-call-site edits. UI-only state (theme, zoom, wrap) never touches the doc and
+  never stamps.
+- **Display.** Dashboard cards show `แก้ไขล่าสุด <date>` under the existing update-date line; the
+  Project Status header shows the same stamp, refreshed in place after each save (no re-render
+  mid-edit). `fmtStamp()` renders legacy date-only values as `DD/MM/YYYY` and full-ISO values as
+  `DD/MM/YYYY HH:mm` local time — old v1.0.4-and-earlier date-only stamps are tolerated, not
+  reformatted or upgraded. The redundant manual date-only stamp in the status-save handler is
+  dropped in favour of the central stamp.
+
+### Feature — Project NOTEs popup (F2)
+
+- **`โน้ต` button** on the Project Status header opens a dedicated notes popup, tabbed
+  **ธุรกิจ · BUSINESS** / **เทคนิค · TECHNICAL** (one panel visible at a time; both stay mounted so
+  switching preserves in-flight edits and flushes any pending save first), each tab showing a live
+  non-empty-section count.
+- **Date-sectioned notepad.** Each tab's content is a newest-first list of per-day sections behind a
+  dashed date divider; today's section is created lazily on the first keystroke rather than littering
+  empty sections on open.
+- **Autosave.** Typing debounces 600ms, sanitizes, and writes through `Store.save()` (which also
+  applies the F1 stamp and schedules the cloud push) — a `กำลังบันทึก… / บันทึกแล้ว ✓` chip tracks
+  state; also flushed on tab switch, blur, and popup close.
+- **Delete with two-click arm-confirm.** Each date divider carries a bin button; the first click
+  arms it and shows a light-red apple-glass confirm popover beside the bin (auto-flips side to avoid
+  clipping, auto-disarms ~3.2s, no native `confirm()`, no bottom toast); the second click (or a click
+  on the popover) deletes the whole day section including its divider. Every deletion is appended to
+  a per-project action log (capped at 200 entries), viewable via a `log (n)` chip that toggles a
+  compact strip below the tab bar.
+- **Rich text.** Bold / italic / bullet-list toolbar plus a 6-swatch text-colour palette and a
+  light-yellow (`#fff3a8`) highlighter with clean toggle-off (DOM-inspection based, not
+  `hiliteColor('transparent')`, which was found to nest a see-through span over the yellow one).
+  Paste is forced to plain text.
+- **Storage.** `DB.notes[pid] = { business:[], technical:[], log:[] }` is a **separate top-level
+  section of the doc**, deliberately outside `projects[]` — it rides every D1 snapshot and every
+  `prod_state_snapshot_*.json` backup automatically without a schema/Worker change. `migrateDB`
+  ensures `DB.notes` exists on old docs (idempotent, no `docVer` bump); project delete prunes the
+  project's notes in the same mutation.
+- **Sanitizer hardening.** `sanitizeNoteHtml()` / `stripNoteText()` whitelist-gate stored HTML on
+  both save and render (tags `B STRONG I EM SPAN DIV P BR FONT UL LI`; only `color` /
+  `background-color` style, `script`/`style`/`iframe` dropped entirely) — the XSS gate for HTML that
+  round-trips through the doc/cloud.
+
+### UI polish
+
+- **Feature text aligns with its module name.** In the left tree pane, feature rows (including the
+  fid prefix) now start exactly at their parent module's name x-position at every depth
+  (`.cell.feat` base indent 4px → 51px, `.addFeat` 6px → 53px; the per-level step ladder is
+  unchanged). User-approved on a cloud-disabled demo before landing.
+
+### Testing
+
+- **176 Playwright tests, green ×3 consecutive runs** — the 163-test v1.0.4 baseline plus 13 new
+  spec-§5 tests (`stamps-v105.spec.js`: T-F0, T-F1a–c; `notes-v105.spec.js`: T-F2a–g, T-SAFE). Every
+  browser context still blocks the production Worker host — zero prod-host requests.
+- **Sanitizer hardening found via T-F2c.** Parsing untrusted HTML by assigning it into a
+  live-document detached `div` still starts `<img>` fetches and fires inline `onerror` handlers
+  *during* sanitization. `sanitizeNoteHtml()` and `stripNoteText()` now parse in an inert `DOMParser`
+  document instead — nothing loads, nothing fires — before the whitelist strip runs.
+
 ## v1.0.4 — 2026-07-18 — Multi-level tree, grip menu, continuous zoom & themes
 
 The module structure becomes a full **multi-level tree** — modules nest sub-modules to
