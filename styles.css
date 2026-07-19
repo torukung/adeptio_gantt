@@ -302,7 +302,7 @@ button{font-family:inherit; cursor:pointer;}
 .featRow > .gripMenu{position:absolute; left:0; top:0; bottom:0; z-index:6;}
 .rowMain{display:flex; align-items:stretch; flex:1 1 auto; min-width:0; transition:transform .2s var(--ease);}
 .featRow > .gripMenu:hover ~ .rowMain, .featRow > .gripMenu:focus-within ~ .rowMain{transform:translateX(calc(var(--railW,0px) + 16px)); pointer-events:none;}
-.addFeat{display:flex; align-items:center; gap:6px; height:32px; padding:0 8px 0 calc(6px + var(--step) * var(--lvl, 1)); color:var(--violet-adpt); font-size:12.5px; cursor:pointer; border-bottom:1px solid var(--line);
+.addFeat{display:flex; align-items:center; gap:6px; height:32px; padding:0 8px 0 calc(53px + var(--step) * var(--lvl, 1)); color:var(--violet-adpt); font-size:12.5px; cursor:pointer; border-bottom:1px solid var(--line);
   background-color:var(--panel);
   background-image:
     repeating-linear-gradient(90deg, var(--rail) 0 2px, transparent 2px var(--step)),   /* Stage-2 ancestor rail ladder */
@@ -332,7 +332,7 @@ button{font-family:inherit; cursor:pointer;}
 /* v1.0.4 — PROPORTIONAL indent at ANY depth (R11): each row carries an inline --lvl = its
    tree depth; padding lives INSIDE the row (never a margin/height change), so row heights
    stay --modH / --rowH at every depth. depth 0/1 reproduce the v1.0.3 one/two-step values. */
-.cell.feat{padding-left:calc(4px + var(--step) * var(--lvl, 1));}       /* feature: 4px + (depth) steps */
+.cell.feat{padding-left:calc(51px + var(--step) * var(--lvl, 1));}      /* v1.0.5 ui: 51px base lands feature text EXACTLY on its parent module's name x (75px at lvl1, 99px at lvl2, ...) — user-approved alignment 2026-07-19 */
 .subMod .chip{margin-left:calc(var(--step) * var(--lvl, 1));}          /* sub-container header: chip + name shift (depth) steps */
 .subMod .modName{font-weight:500;}                                     /* lighter than a root's 700 → hierarchy reads */
 /* 2.2.2 — own-level 2px vertical rail (::before) + elbow (::after), generalised to ANY depth by
