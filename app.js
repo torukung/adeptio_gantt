@@ -157,6 +157,7 @@ const IC = {
   indent:  ic('<path d="M4 6h16M4 12h9M4 18h16"/><path d="M15 8.5l3.5 3.5-3.5 3.5"/>'),   // ⇥ tuck under previous sibling (Indent)
   outdent: ic('<path d="M4 6h16M11 12h9M4 18h16"/><path d="M8.5 8.5L5 12l3.5 3.5"/>'),   // ⇤ lift to grandparent level (Outdent)
   promote: ic('<path d="M8 8l4-4 4 4M8 16l4 4 4-4"/>'),                                   // ⇄ convert Feature ⇆ Module (promote/demote)
+  note:  ic('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>'),  // v1.0.5 F2: โน้ตโครงการ
 };
 
 /* =====================  STORE (local-first, optional cloud sync)  ===== */
@@ -256,6 +257,7 @@ function editingNow(){
   if(a && (a.tagName==="TEXTAREA" || a.tagName==="INPUT" || a.isContentEditable)) return true;
   if(el("modalRoot") && el("modalRoot").style.display==="block") return true;
   if(el("historyOverlay") && el("historyOverlay").style.display==="flex") return true;
+  if(notesOpen()) return true;                 // v1.0.5 F2 (N5): never adopt a remote doc / re-render while the notes popup is open
   return false;
 }
 function adoptRemote(doc, rev){ DB=doc; migrateDB(DB); MEM=DB; safeSet(JSON.stringify(DB)); setLsRev(rev); route(); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent)
@@ -516,6 +518,7 @@ function renderDashboard(){
     e.stopPropagation();
     const p=DB.projects.find(x=>x.id===b.dataset.id);
     if(confirm(`ลบโครงการ “${p.name}” ทั้งหมด? การลบไม่สามารถย้อนกลับได้`)){
+      if(DB.notes) delete DB.notes[b.dataset.id];  // v1.0.5 F2: prune the project's notes in the same mutation
       DB.projects = DB.projects.filter(x=>x.id!==b.dataset.id); Store.save(); renderDashboard(); toast("ลบโครงการแล้ว");
     }
   });
@@ -716,6 +719,7 @@ function renderSummary(){
         <span class="lab">สรุปสถานะโครงการ</span>
         <span class="grow"></span>
         <span class="sumDateWrap">วันที่อัปเดต <input type="date" id="sumDate" value="${esc(cur.date||iso(today()))}"/></span>
+        <button class="btn sm" id="sumNotes" title="โน้ตโครงการ (ธุรกิจ / เทคนิค)">${IC.note}<span>โน้ต (<span id="sumNotesCount">${notesCount(P.id)}</span>)</span></button>
         <button class="btn sm" id="goTimeline" title="ไปหน้าไทม์ไลน์และ Gantt">ไทม์ไลน์โครงการ ${IC.arrow}</button>
       </div>
       <div class="sumStamp mono" id="statusStamp">${P.updatedAt ? "แก้ไขล่าสุด "+esc(fmtStamp(P.updatedAt)) : ""}</div>
@@ -743,6 +747,7 @@ function renderSummary(){
   };
   el("sumHist").onclick = ()=>{ if(cur.text!==ta.value){ cur.text=ta.value; Store.save(); } location.hash="project="+PID+"&view=history"; }; // FIX: save current summary text before hash-nav to the history overlay
   const gt=el("goTimeline"); if(gt) gt.onclick=()=> switchTab("timeline");
+  const nb=el("sumNotes"); if(nb) nb.onclick=()=>{ if(cur.text!==ta.value){ cur.text=ta.value; Store.save(); } openNotes(); }; // v1.0.5 F2: persist in-flight summary text before opening the popup
   renderProgress();
 }
 
@@ -945,7 +950,11 @@ function updateMeta(){
    both panes render from a single flatten(P) (R9). */
 
 /* ---- MIGRATION (R-spec §2): v1 flat modules → recursive tree. Idempotent, one place. ---- */
-function migrateDB(DB){ if(DB && Array.isArray(DB.projects)) DB.projects.forEach(migrateDoc); return DB; }
+function migrateDB(DB){
+  if(DB && typeof DB==="object" && (!DB.notes || typeof DB.notes!=="object" || Array.isArray(DB.notes))) DB.notes={}; // v1.0.5 F2: additive, idempotent, NO docVer bump (spec §4.7)
+  if(DB && Array.isArray(DB.projects)) DB.projects.forEach(migrateDoc);
+  return DB;
+}
 function v1FeatureToNode(f){
   // Keep the existing (uid-minted) unique feature id as the node id; keep ALL unknown fields.
   const n = Object.assign({}, f);
@@ -2274,6 +2283,288 @@ async function backupModal(){
   }
 }
 
+/* =====================  PROJECT NOTES (v1.0.5 F2) =====================
+   Storage (spec §4.7): DB.notes[pid] = { business:[{date,html}], technical:[{date,html}], log:[{ts,action,col,date}] }
+   — a SEPARATE top-level doc section (never inside projects[]), so every D1 snapshot backs it up.
+   DOM CONTRACT between this core and renderNotesBody() (UI):
+   - each column panel:   .noteCol[data-col="business"|"technical"]  (exactly one .active at a time)
+   - each day's editor:   .noteEdit[contenteditable][data-col][data-date="YYYY-MM-DD"] (+ data-today="1" on the lazy today region)
+   - each divider:        .dateDiv[data-date] holding .dateChip + .binBtn
+   The engine below owns persistence; the UI owns rendering + toolbars + bin/popover/highlight. */
+const NOTE_TAGS = new Set(["B","STRONG","I","EM","SPAN","DIV","P","BR","FONT","UL","LI"]);
+const NOTE_HI = "#fff3a8";                       // highlight yellow (N11)
+const NOTE_SECTION_CAP = 20000;                  // stored-html chars per day section
+let notesTab = "business", _notesSaveT = null, _notesCapWarned = false;
+
+/* Sanitizer (N6) — the XSS gate for html round-tripped through the doc/cloud. Runs on SAVE and on RENDER. */
+function sanitizeNoteHtml(html){
+  const box=document.createElement("div");
+  box.innerHTML=String(html==null?"":html);
+  (function clean(node){
+    [...node.childNodes].forEach(c=>{
+      if(c.nodeType===3) return;                                   // text → keep
+      if(c.nodeType!==1){ c.remove(); return; }                    // comments etc. → drop
+      const tag=c.tagName.toUpperCase();
+      if(tag==="SCRIPT"||tag==="STYLE"||tag==="IFRAME"){ c.remove(); return; }  // dropped WITH content
+      if(!NOTE_TAGS.has(tag)){                                     // disallowed → unwrap, keep cleaned children
+        clean(c);
+        const par=c.parentNode; while(c.firstChild) par.insertBefore(c.firstChild, c);
+        par.removeChild(c); return;
+      }
+      const color=c.style?c.style.color:"", bg=c.style?c.style.backgroundColor:"";
+      const fontColor=(tag==="FONT")?c.getAttribute("color"):null;
+      [...c.attributes].forEach(a=>c.removeAttribute(a.name));     // kills on*, class, href, data-*, …
+      if(color) c.style.color=color;
+      if(bg && bg!=="transparent" && bg!=="rgba(0, 0, 0, 0)") c.style.backgroundColor=bg;  // keep highlight, drop un-highlight leftovers
+      if(fontColor) c.setAttribute("color",fontColor);
+      clean(c);
+    });
+  })(box);
+  return box.innerHTML;
+}
+function stripNoteText(html){ const d=document.createElement("div"); d.innerHTML=html||""; return (d.textContent||"").trim(); }
+
+/* ---- data accessors ---- */
+function notesOf(pid){
+  if(!DB.notes || typeof DB.notes!=="object" || Array.isArray(DB.notes)) DB.notes={};
+  let n=DB.notes[pid]; if(!n || typeof n!=="object") n=DB.notes[pid]={};
+  if(!Array.isArray(n.business)) n.business=[];
+  if(!Array.isArray(n.technical)) n.technical=[];
+  if(!Array.isArray(n.log)) n.log=[];
+  return n;
+}
+function notesCount(pid){ const n=notesOf(pid), c=a=>a.filter(s=>s && stripNoteText(s.html).length).length; return c(n.business)+c(n.technical); }
+function notesLogAdd(pid, entry){ const n=notesOf(pid); n.log.unshift(entry); if(n.log.length>200) n.log.length=200; }
+function notesOpen(){ const ov=el("notesOverlay"); return !!(ov && ov.style.display==="flex"); }
+
+/* ---- autosave engine: input → 600ms debounce → sanitize+collect → Store.save (which stamps F1 + cloud-pushes) ---- */
+function collectNotesFromDom(){
+  const out={business:[],technical:[]};
+  document.querySelectorAll("#notesOverlay .noteEdit").forEach(ed=>{
+    if(!(ed.textContent||"").trim()) return;                       // empty sections prune on save
+    let html=sanitizeNoteHtml(ed.innerHTML);
+    if(html.length>NOTE_SECTION_CAP){ html=html.slice(0,NOTE_SECTION_CAP); if(!_notesCapWarned){ _notesCapWarned=true; toast("โน้ตเกิน "+NOTE_SECTION_CAP.toLocaleString()+" ตัวอักษรต่อวัน — ตัดส่วนเกินออก"); } }
+    const col=ed.dataset.col, date=ed.dataset.date;
+    if(out[col] && date) out[col].push({date, html});
+  });
+  const newestFirst=(a,b)=> a.date<b.date?1:(a.date>b.date?-1:0);
+  out.business.sort(newestFirst); out.technical.sort(newestFirst);
+  return out;
+}
+function notesMarkDirty(){ notesChip("saving"); clearTimeout(_notesSaveT); _notesSaveT=setTimeout(notesFlush, 600); }
+function notesFlush(){
+  clearTimeout(_notesSaveT); _notesSaveT=null;
+  if(!PID || !notesOpen()) return;
+  const n=notesOf(PID), got=collectNotesFromDom();
+  n.business=got.business; n.technical=got.technical;
+  Store.save();
+  notesChip("saved"); notesSyncCounts();
+}
+function notesChip(state){
+  const c=el("notesChip"); if(!c) return;
+  if(state==="saving"){ c.textContent="กำลังบันทึก…"; c.className="saveChip"; }
+  else { c.textContent="บันทึกแล้ว ✓"; c.className="saveChip saved"; }
+}
+function notesSyncCounts(){
+  const badge=el("sumNotesCount"); if(badge && PID) badge.textContent=notesCount(PID);
+  const n=PID?notesOf(PID):null; if(!n) return;
+  const c=a=>a.filter(s=>s && stripNoteText(s.html).length).length;
+  const liveCol=col=>{ let k=0; document.querySelectorAll('#notesOverlay .noteEdit[data-col="'+col+'"]').forEach(ed=>{ if((ed.textContent||"").trim()) k++; }); return k; };
+  const b=el("notesTabCountBiz"), t=el("notesTabCountTech");
+  if(b) b.textContent="("+(notesOpen()?liveCol("business"):c(n.business))+")";
+  if(t) t.textContent="("+(notesOpen()?liveCol("technical"):c(n.technical))+")";
+}
+
+/* ---- deletion + action log (N10): the UI's bin-confirm calls this AFTER removing the section's DOM ---- */
+function notesDeleteSection(col, date){
+  if(!PID) return;
+  notesLogAdd(PID, {ts:nowIso(), action:"delete", col:col, date:date});
+  notesFlush(); renderNotesLog();
+  toast("ลบโน้ตแล้ว · บันทึกลง log");
+}
+function renderNotesLog(){
+  const c=el("notesLogCount"), s=el("notesLogStrip"); if(!c||!s||!PID) return;
+  const L=notesOf(PID).log;
+  c.textContent=L.length;
+  s.innerHTML=L.length
+    ? L.map(e=> esc(fmtStamp(e.ts))+" · ลบโน้ต"+(e.col==="business"?"ธุรกิจ":"เทคนิค")+" "+esc(fmtStamp(e.date))).join("<br>")
+    : "ยังไม่มีการลบ";
+}
+
+/* ---- overlay shell: root DIV is CREATED BY JS (index.html is frozen — N4) ---- */
+function ensureNotesRoot(){ if(!el("notesOverlay")){ const d=document.createElement("div"); d.id="notesOverlay"; document.body.appendChild(d); } }
+function openNotes(){
+  if(!PID) return;
+  ensureNotesRoot();
+  const ov=el("notesOverlay"), P=proj(); if(!P) return;
+  notesTab="business";
+  ov.innerHTML=`
+    <div class="notesModal" role="dialog" aria-modal="true" aria-label="โน้ตโครงการ">
+      <div class="notesHead">
+        <span class="notesTitle">โน้ตโครงการ · ${esc(P.name)}</span>
+        <span class="saveChip saved" id="notesChip">บันทึกแล้ว ✓</span>
+        <button class="logChip" id="notesLogChip" title="ประวัติการลบ (action log)">log (<span id="notesLogCount">0</span>)</button>
+        <button class="closeX" id="notesClose" aria-label="ปิด">${IC.x}</button>
+      </div>
+      <div class="tabBar" role="tablist">
+        <button class="tabBtn on" id="notesTabBiz" role="tab" aria-selected="true" data-col="business">ธุรกิจ · BUSINESS <span class="tabCount" id="notesTabCountBiz"></span></button>
+        <button class="tabBtn" id="notesTabTech" role="tab" aria-selected="false" data-col="technical">เทคนิค · TECHNICAL <span class="tabCount" id="notesTabCountTech"></span></button>
+      </div>
+      <div class="logStrip" id="notesLogStrip"></div>
+      <div class="notesBody" id="notesBody"></div>
+    </div>`;
+  ov.style.display="flex";
+  requestAnimationFrame(()=>ov.classList.add("open"));
+  el("notesClose").onclick=closeNotes;
+  ov.onclick=e=>{ if(e.target===ov) closeNotes(); };
+  el("notesTabBiz").onclick =()=>notesSwitchTab("business");
+  el("notesTabTech").onclick=()=>notesSwitchTab("technical");
+  el("notesLogChip").onclick=()=>{ renderNotesLog(); el("notesLogStrip").classList.toggle("open"); };
+  renderNotesBody();
+  notesApplyTab();
+  renderNotesLog();
+  notesSyncCounts();
+}
+function closeNotes(){
+  if(_notesSaveT) notesFlush();                     // never lose a pending edit on close
+  const ov=el("notesOverlay"); if(!ov || ov.style.display!=="flex") return;
+  ov.classList.remove("open");
+  setTimeout(()=>{ ov.style.display="none"; ov.innerHTML=""; }, 180);
+  notesSyncCounts();
+}
+function notesSwitchTab(col){
+  if(col===notesTab) return;
+  if(_notesSaveT) notesFlush();                     // pending edit flushes BEFORE the other panel shows
+  notesTab=col; notesApplyTab();
+}
+function notesApplyTab(){
+  document.querySelectorAll("#notesBody .noteCol").forEach(cEl=> cEl.classList.toggle("active", cEl.dataset.col===notesTab));
+  [["notesTabBiz","business"],["notesTabTech","technical"]].forEach(([id,col])=>{
+    const b=el(id); if(!b) return;
+    b.classList.toggle("on", col===notesTab);
+    b.setAttribute("aria-selected", col===notesTab ? "true" : "false");
+  });
+}
+
+/* ===== WORKER-SLOT (v1.0.5 F2 UI): renderNotesBody =====
+   Renders BOTH .noteCol panels into #notesBody per the DOM contract above, porting the approved
+   prototype r4: sticky toolbar (B / I / bullets / highlight NOTE_HI / 6 foreColor swatches),
+   newest-first date sections with dashed dividers, lazy today section, bin + glass confirm
+   popover (calls notesDeleteSection(col,date) AFTER removing the section's DOM), plain-text
+   paste, input → notesMarkDirty(). Private helpers are prefixed notesUi*. */
+const NOTES_UI_COLORS = [                                   // toolbar text-colour palette (default = live ink token)
+  {css:"var(--ink)", val:"__ink__"}, {css:"#9241ff", val:"#9241ff"}, {css:"#4f98ff", val:"#4f98ff"},
+  {css:"#00ce83", val:"#00ce83"}, {css:"#ff9500", val:"#ff9500"}, {css:"#ff4a7b", val:"#ff4a7b"}
+];
+const notesUiInk = () => (getComputedStyle(document.documentElement).getPropertyValue("--ink").trim() || "#16181d");
+const notesUiPd  = e => e.preventDefault();                 // mousedown-preventDefault keeps the editor selection alive when a toolbar control is pressed
+
+function renderNotesBody(){
+  const body=el("notesBody"); if(!body) return;
+  body.innerHTML="";
+  const n = PID ? notesOf(PID) : {business:[], technical:[]};
+  body.appendChild(notesUiColumn("business",  "BUSINESS",  "โน้ตธุรกิจ", n.business  || []));   // business first (engine toggles .active)
+  body.appendChild(notesUiColumn("technical", "TECHNICAL", "โน้ตเทคนิค", n.technical || []));
+}
+function notesUiColumn(col, eyebrow, label, arr){
+  const wrap=document.createElement("div"); wrap.className="noteCol"; wrap.dataset.col=col;
+  const head=document.createElement("div"); head.className="noteColHead";
+  head.innerHTML='<span class="eyebrow">'+esc(eyebrow)+'</span><span class="noteColLab">'+esc(label)+'</span>';
+  wrap.appendChild(head);
+  const scroll=document.createElement("div"); scroll.className="colScroll";
+  scroll.appendChild(notesUiToolbar());
+  const tIso=iso(today());
+  const tEntry=arr.find(s=> s && s.date===tIso), tHtml=tEntry?tEntry.html:"";                    // seed a stored today section into the lazy region (never render today twice)
+  const tDiv=notesUiDivider(col, tIso, true); tDiv.hidden = stripNoteText(tHtml).length===0;      // today divider hidden until there is content
+  scroll.appendChild(tDiv);
+  scroll.appendChild(notesUiEditor(col, tIso, tHtml, true));
+  arr.filter(s=> s && s.date && s.date!==tIso)
+     .sort((a,b)=> a.date<b.date?1:(a.date>b.date?-1:0))                                          // newest-first
+     .forEach(s=>{ scroll.appendChild(notesUiDivider(col, s.date, false)); scroll.appendChild(notesUiEditor(col, s.date, s.html, false)); });
+  wrap.appendChild(scroll);
+  return wrap;
+}
+function notesUiToolbar(){
+  const bar=document.createElement("div"); bar.className="colToolbar";
+  const mkText=(label,cmd,italic)=>{ const b=document.createElement("button"); b.type="button"; b.className="fmtBtn"; b.textContent=label; b.style.fontWeight="700"; if(italic) b.style.fontStyle="italic"; b.addEventListener("mousedown", notesUiPd); b.onclick=()=>notesUiFmt(cmd); return b; };
+  const bull=document.createElement("button"); bull.type="button"; bull.className="fmtBtn"; bull.title="รายการหัวข้อ (bullets)";
+  bull.innerHTML='<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4.5" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="4.5" cy="18" r="1.4" fill="currentColor" stroke="none"/></svg>';
+  bull.addEventListener("mousedown", notesUiPd); bull.onclick=()=>notesUiFmt("insertUnorderedList");
+  const hi=document.createElement("button"); hi.type="button"; hi.className="fmtBtn"; hi.title="ไฮไลต์ (เหลืองอ่อน)";
+  hi.innerHTML='<svg viewBox="0 0 24 24" width="14" height="14"><rect x="3" y="18" width="18" height="4" rx="1.5" fill="#f2d21f"/><path d="m8.5 14.5 7-7a2 2 0 0 1 2.8 2.8l-7 7-3.6.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
+  hi.addEventListener("mousedown", notesUiPd); hi.onclick=notesUiHighlight;
+  bar.append(mkText("B","bold",false), mkText("I","italic",true), bull, hi);
+  const row=document.createElement("div"); row.className="swatchRow";
+  NOTES_UI_COLORS.forEach(c=>{ const s=document.createElement("button"); s.type="button"; s.className="swatch"; s.style.background=c.css; s.title="สีตัวอักษร"; s.addEventListener("mousedown", notesUiPd); s.onclick=()=>notesUiColor(c.val==="__ink__"?notesUiInk():c.val); row.appendChild(s); });
+  bar.appendChild(row);
+  return bar;
+}
+function notesUiEditor(col, date, html, isToday){
+  const ed=document.createElement("div");
+  ed.className="noteEdit"+(isToday?" today":"");
+  ed.contentEditable="true"; ed.spellcheck=false; ed.dataset.col=col; ed.dataset.date=date;       // data-date on EVERY editor — collectNotesFromDom() collects by it
+  if(isToday){ ed.dataset.today="1"; ed.dataset.ph="วันนี้ — พิมพ์โน้ตที่นี่…"; }
+  ed.innerHTML=sanitizeNoteHtml(html);                                                             // sanitize on render too (N6)
+  ed.addEventListener("input", notesUiInput);
+  ed.addEventListener("paste", notesUiPastePlain);
+  return ed;
+}
+function notesUiDivider(col, date, isToday){
+  const d=document.createElement("div"); d.className="dateDiv"; d.dataset.date=date;
+  d.innerHTML='<span class="dateChip">— '+esc(fmtStamp(date))+' —</span>';
+  const bin=document.createElement("button"); bin.type="button"; bin.className="binBtn"; bin.title="ลบโน้ตวันที่ "+fmtStamp(date); bin.innerHTML=IC.trash;
+  let disarmT=null, pop=null;
+  const disarm=()=>{ bin.classList.remove("armed"); if(pop){ const p=pop; pop=null; p.classList.remove("show"); setTimeout(()=>p.remove(),200); } };
+  const confirmDel=()=>{ clearTimeout(disarmT); disarm(); notesUiRemoveSection(col, date, d, isToday); };
+  bin.onclick=()=>{
+    if(bin.classList.contains("armed")){ confirmDel(); return; }                                   // second bin click confirms
+    bin.classList.add("armed");
+    pop=document.createElement("div"); pop.className="delPop";
+    pop.textContent="ลบโน้ต "+fmtStamp(date)+" ทั้งหมด? — คลิกเพื่อยืนยัน";
+    pop.onclick=e=>{ e.stopPropagation(); confirmDel(); };                                          // clicking the popover also confirms
+    d.appendChild(pop);
+    const left=bin.offsetLeft+bin.offsetWidth+8; pop.style.left=left+"px";                          // right of the bin…
+    requestAnimationFrame(()=>{ if(left+pop.offsetWidth > d.clientWidth-4){ pop.style.left=""; pop.style.right=(d.clientWidth-bin.offsetLeft+8)+"px"; } pop.classList.add("show"); });  // …flip left when it would clip the column edge
+    disarmT=setTimeout(disarm, 3200);                                                               // auto-disarm ~3.2s
+  };
+  d.appendChild(bin);
+  return d;
+}
+function notesUiRemoveSection(col, date, divEl, isToday){
+  const ed=divEl.nextElementSibling;                                                               // the editor always directly follows its divider
+  if(isToday || (ed && ed.dataset && ed.dataset.today)){ if(ed) ed.innerHTML=""; divEl.hidden=true; }  // today: clear content + re-hide divider (typing re-reveals it)
+  else { if(ed) ed.remove(); divEl.remove(); }                                                     // else remove the WHOLE day section
+  notesDeleteSection(col, date);                                                                   // engine appends the log entry + flushes + toasts (AFTER the DOM is gone)
+}
+function notesUiInput(e){
+  const ed=e.currentTarget;
+  if(ed.dataset.today){                                                                            // reveal / hide today's divider lazily
+    const has=(ed.textContent||"").trim().length>0;
+    const div=ed.previousElementSibling;
+    if(div && div.classList.contains("dateDiv")) div.hidden=!has;
+  }
+  notesSyncCounts(); notesMarkDirty();
+}
+function notesUiPastePlain(e){                                                                      // force plain-text paste (nothing foreign reaches the sanitizer)
+  e.preventDefault();
+  const t=(e.clipboardData||window.clipboardData).getData("text/plain");
+  document.execCommand("insertText", false, t);
+}
+function notesUiFmt(cmd){ document.execCommand(cmd, false, null); notesMarkDirty(); }
+function notesUiColor(val){ try{ document.execCommand("styleWithCSS", false, true); }catch(e){} document.execCommand("foreColor", false, val); notesMarkDirty(); }
+function notesUiHighlight(){                                                                        // N11: detect highlighted state by DOM inspection (queryCommandValue is unreliable across the wrapping span)
+  const sel=window.getSelection(); if(!sel || !sel.rangeCount) return;
+  const range=sel.getRangeAt(0);
+  let anc=range.commonAncestorContainer; if(anc.nodeType!==1) anc=anc.parentElement;
+  const scope=(anc && anc.closest && anc.closest(".noteEdit")) || anc; if(!scope) return;
+  const hits=[...scope.querySelectorAll('[style*="background"]')].filter(n=> range.intersectsNode(n));
+  const ancsWithBg=[];
+  for(let p=anc; p && p!==scope.parentElement; p=p.parentElement){ if(p.style && p.style.backgroundColor) ancsWithBg.push(p); if(p===scope) break; }
+  if(!hits.length && !ancsWithBg.length){ try{ document.execCommand("styleWithCSS", false, true); }catch(e){} document.execCommand("hiliteColor", false, NOTE_HI); }  // apply
+  else { hits.forEach(n=> n.style.backgroundColor=""); ancsWithBg.forEach(n=> n.style.backgroundColor=""); }                                                             // whole-run removal (no partial splits)
+  notesMarkDirty();
+}
+
 /* =====================  INIT  ===================== */
 Store.load();
 applyTheme();                                          // §1.10: stamp html[data-theme] from ui.theme BEFORE the first render (no light→dark flash)
@@ -2288,6 +2579,7 @@ if(cloudOn()){ cloudSync(); window.addEventListener('focus', ()=>cloudPull(false
 document.addEventListener('keydown', e=>{
   if(e.key==="Escape"){
     if(el("modalRoot").style.display==="block") closeModal();
+    else if(notesOpen()) closeNotes();                              // v1.0.5 F2: notes popup closes before the overlays below it
     else if(el("historyOverlay").style.display==="flex" && PID) location.hash="project="+PID;
     else {
       const a=document.activeElement; if(a && a.closest && a.closest('.gripMenu')) a.blur();  // keyboard-opened menu: releases :focus-within
