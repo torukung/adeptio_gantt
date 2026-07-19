@@ -56,16 +56,63 @@ const LS_UI = "adeptio_ptrack_ui";
 const PPD_MIN=0.9, PPD_MAX=34;
 const PRESET_PPD={ day:34, week:11, month:4.4 };
 function clampPpd(v){ v=+v; if(!isFinite(v)) v=PRESET_PPD.week; return Math.max(PPD_MIN, Math.min(PPD_MAX, v)); }
-const ui = { cal:"CE", wrapTxt:false, colW:{}, ppd:PRESET_PPD.week };  // default zoom = week (11px/day), same as v1.0.3
+const THEME_MODES = ["auto","light","dark"];                                                            // §1.10/R12: theme mode set (sanitizer domain)
+const ui = { cal:"CE", wrapTxt:false, colW:{}, ppd:PRESET_PPD.week, theme:"auto" };  // default zoom = week (11px/day), same as v1.0.3; default theme = auto (follow OS)
 try{ const _u=JSON.parse(localStorage.getItem(LS_UI)||"{}"); if(_u && typeof _u==="object"){
   if("wrapTxt" in _u) ui.wrapTxt=!!_u.wrapTxt;
   if(_u.colW && typeof _u.colW==="object") ui.colW=_u.colW;
   if("ppd" in _u && _u.ppd!=null && isFinite(+_u.ppd)) ui.ppd=clampPpd(_u.ppd);                        // R12: restore continuous zoom, sanitized into [0.9,34]
   else if(typeof _u.zoom==="string" && PRESET_PPD[_u.zoom]!=null) ui.ppd=clampPpd(PRESET_PPD[_u.zoom]); // legacy: a stored preset string maps to its PPD ONCE (saveUi no longer writes `zoom`, so it drops next save)
+  if(typeof _u.theme==="string" && THEME_MODES.includes(_u.theme)) ui.theme=_u.theme;                  // R12: restore theme, sanitized to {auto,light,dark}; anything else → default 'auto'
 } }catch(e){}
 /* FIX: colW is now namespaced per project ({pid:{key:w}}). Drop any legacy flat {key:w} (numeric top-level values) so old widths can't bleed across projects or corrupt the nested shape. */
 if(ui.colW && Object.keys(ui.colW).some(k=>typeof ui.colW[k]==="number")) ui.colW={};
-function saveUi(){ try{ localStorage.setItem(LS_UI, JSON.stringify({wrapTxt:!!ui.wrapTxt, colW:ui.colW||{}, ppd:clampPpd(ui.ppd)})); }catch(e){} } // R12: persist ppd beside wrapTxt/colW; never the doc, and no legacy `zoom` key
+function saveUi(){ try{ localStorage.setItem(LS_UI, JSON.stringify({wrapTxt:!!ui.wrapTxt, colW:ui.colW||{}, ppd:clampPpd(ui.ppd), theme:(THEME_MODES.includes(ui.theme)?ui.theme:"auto")})); }catch(e){} } // R12: persist ppd + theme beside wrapTxt/colW; never the doc, and no legacy `zoom` key
+
+/* ---------- THEME (v1.0.4 §1.10 / R12): Auto / Light / Dark ----------
+   Per-device in `ui` (LS_UI), NEVER in the doc. 'auto' follows the OS prefers-color-scheme; explicit
+   light/dark OVERRIDE it (both directions, §5.4). The EFFECTIVE theme is written as a CONCRETE
+   'light'|'dark' onto document.documentElement[data-theme] — that attribute drives (a) the dark token
+   block + scattered [data-theme="dark"] overrides in styles.css, and (b) the inline dark bar-fill branch
+   in renderTimeline. A switch re-renders the board because bar fills are inline (not token-driven). */
+function prefersDark(){ try{ return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches); }catch(e){ return false; } }
+function effectiveTheme(){ const t=THEME_MODES.includes(ui.theme)?ui.theme:"auto"; return (t==="dark" || (t==="auto" && prefersDark())) ? "dark" : "light"; }
+function syncThemeSeg(){ document.querySelectorAll("[data-theme-set]").forEach(b=> b.classList.toggle("on", b.dataset.themeSet===ui.theme)); } // segmented control reflects ui.theme
+function applyTheme(){ document.documentElement.setAttribute("data-theme", effectiveTheme()); syncThemeSeg(); }                        // idempotent: (re)stamp the root + refresh the control
+function domThemeDark(){ return document.documentElement.getAttribute("data-theme")==="dark"; }                                       // §1.10 T1: the DOM attribute is the SINGLE render-time authority — render code READS it; effectiveTheme() only decides what applyTheme()/export/print WRITE. So a forced-light export/print re-render is automatically consistent (no dark fills leak into the PNG/print).
+function rerenderForTheme(){ if(el("leftBody")) renderBoard(); else if(el("rowsLayer")) renderTimeline(); }                           // rebuild inline bar fills (timeline tab only; summary/dashboard are pure-token → CSS handles them)
+function setTheme(mode){                                                                                                              // control handler: persist + apply + re-render (NOT via apply() — no doc mutation)
+  ui.theme = THEME_MODES.includes(mode) ? mode : "auto"; saveUi();
+  applyTheme(); rerenderForTheme();
+}
+let _themeGuardWired=false, _themeFlipT=null;
+function wireThemeGuard(){                                                                                                            // AUTO mode: re-apply the effective theme when the OS scheme flips (wired ONCE, like wireDragGuard/wireResizeGuard)
+  if(_themeGuardWired) return; _themeGuardWired=true;
+  try{ const mq=window.matchMedia("(prefers-color-scheme: dark)");
+    const onFlip=()=>{
+      if(ui.theme!=="auto") return;                                                                                                  // only auto follows the OS; explicit light/dark ignore the flip
+      applyTheme();                                                                                                                  // T3: stamp the ATTRIBUTE immediately (cheap, CSS-correct) — even mid-edit; token-driven surfaces adapt at once, and the write is safe to interleave with an open contenteditable
+      const rerender=()=>{ if(editingNow()){ _themeFlipT=setTimeout(rerender, 400); return; } _themeFlipT=null; rerenderForTheme(); }; // T3: defer the innerHTML rebuild while an edit is in flight (a mid-edit rebuild drops uncommitted contenteditable text — every other async re-render path defers via editingNow()); retry until idle, then re-render ONCE to the latest state
+      clearTimeout(_themeFlipT); rerender();                                                                                         // reuse ONE handle so rapid OS flips never stack timers
+    };
+    if(mq.addEventListener) mq.addEventListener("change", onFlip); else if(mq.addListener) mq.addListener(onFlip);                    // addListener fallback for older engines
+  }catch(e){}
+}
+/* §1.10 T2: PRINT while dark leaks the INLINE dark bar fills — the @media screen wrap reverts CSS tokens for
+   print but inline styles survive. Wired ONCE (like wireThemeGuard). beforeprint runs BEFORE Chromium paints
+   the print view, so stamping light + a synchronous renderBoard() rebuilds the inline fills as light pastels
+   in time; afterprint restores the user's theme. Covers the menu Print button AND the Cmd-P/browser path. */
+let _printGuardWired=false, _printForcedLight=false;
+function wirePrintGuard(){
+  if(_printGuardWired) return; _printGuardWired=true;
+  window.addEventListener("beforeprint", ()=>{ if(domThemeDark()){ document.documentElement.setAttribute("data-theme","light"); renderBoard(); _printForcedLight=true; } }); // force light + rebuild inline fills synchronously
+  window.addEventListener("afterprint",  ()=>{ if(_printForcedLight){ _printForcedLight=false; applyTheme(); rerenderForTheme(); } });                                        // restore the attribute + re-render the dark inline fills
+}
+/* Palette colour maths for the dark bar-fill branch (§1.10 item 6): a translucent chip fill over the dark
+   board + a light chip-tint ink for legibility. Light theme keeps the pastel pc.fill / dark pc.ink as-is. */
+function hex2rgb(h){ h=String(h==null?"":h).trim().replace(/^#/,""); if(h.length===3) h=h.split("").map(c=>c+c).join(""); const n=parseInt(h||"000000",16); return isNaN(n)?[0,0,0]:[(n>>16)&255,(n>>8)&255,n&255]; }
+function hex2rgba(h,a){ const c=hex2rgb(h); return "rgba("+c[0]+","+c[1]+","+c[2]+","+a+")"; }
+function lighten(h,amt){ const c=hex2rgb(h), m=x=>Math.round(x+(255-x)*amt); return "rgb("+m(c[0])+","+m(c[1])+","+m(c[2])+")"; } // mix toward white by amt∈[0,1]
 function dispYear(d){ return ui.cal==="BE" ? d.getFullYear()+543 : d.getFullYear(); }
 function monName(mi){ return ui.cal==="BE" ? TH_MON[mi] : EN_MON[mi]; }
 function fmtThai(d){ return d.getDate()+" "+monName(d.getMonth())+" "+String(dispYear(d)).slice(-2); }
@@ -486,6 +533,14 @@ function renderProject(){
         <button class="tabBtn" data-tab="timeline" title="ไทม์ไลน์และ Gantt">${IC.gantt}<span>ไทม์ไลน์</span></button>
       </nav>
       <div class="spring"></div>
+      <div class="toolgroup">
+        <div class="seg" id="themeSeg" role="group" aria-label="ธีม">
+          <span class="lbl">ธีม</span>
+          <button data-theme-set="auto" title="อัตโนมัติ — ตามระบบ">อัตโนมัติ</button>
+          <button data-theme-set="light" title="สว่าง">สว่าง</button>
+          <button data-theme-set="dark" title="มืด">มืด</button>
+        </div>
+      </div>
       <div class="toolgroup tlOnly">
         <span class="gl">Scroll</span>
         <div class="seg"><button id="colLeft" title="เลื่อนคอลัมน์ซ้าย">◀</button><span class="lbl">Cols</span><button id="colRight" title="เลื่อนคอลัมน์ขวา">▶</button></div>
@@ -572,6 +627,8 @@ function wireBoard(){
 
 function wireProjectControls(){
   document.querySelectorAll('.tabBtn').forEach(b=> b.onclick=()=> switchTab(b.dataset.tab));
+  document.querySelectorAll('[data-theme-set]').forEach(b=> b.onclick=()=> setTheme(b.dataset.themeSet)); // §1.10 Auto/Light/Dark — persist + apply + re-render (theme applies globally via the root attribute)
+  applyTheme();                                                                                          // re-stamp the root + light the active theme button for this freshly-built toolbar
   document.querySelectorAll('[data-zoom]').forEach(b=>b.onclick=()=> applyZoom(PRESET_PPD[b.dataset.zoom]));   // preset → exact PPD, centred; syncZoomUI drives the active state
   { const zi=el("zoomIn"), zo=el("zoomOut"), zf=el("zoomFit");
     if(zi) zi.onclick=()=> applyZoom(pxPerDay()*1.35);   // §1.8 step ×1.35, centred on the viewport midpoint
@@ -1076,9 +1133,18 @@ function renderBoard(){
    (.modActs / .rowActs). It opens on GRIP hover / focus-within only (never plain row hover),
    slides open to the right, and its buttons only REFLECT the shared predicates (R5) — the
    mutators re-decide. The grip keeps its drag data-act (moddrag/rowdrag) + _DRAG_SEL class. ---- */
-/* G6a/§1.9 stepped shading: --shade = rgba(146,65,255, .03 × depth), set INLINE per row (no lvl1..6
-   class clamp — the spec formula is unbounded). depth 0 ⇒ no tint (falls back to the CSS default). */
-function shadeVar(v){ const a=3*Math.max(0, v|0); return a<=0 ? "" : "--shade:rgba(146,65,255,"+(a>=100?"1":"."+String(a).padStart(2,"0"))+");"; }
+/* G6a/§1.9 stepped shading: set INLINE per row (no lvl1..6 class clamp — the spec formula is unbounded).
+   §1.10 theme channel: emit BOTH the light and dark shade inline; styles.css resolves --shade:var(--shade-l)
+   by default and --shade:var(--shade-d) under [data-theme="dark"], so pane-parity holds in BOTH themes
+   with NO re-render on switch. Light = rgba(146,65,255, .03×depth) · Dark = rgba(169,112,255, .055×depth).
+   depth 0 ⇒ no tint (falls back to the CSS default --shade-l/-d: transparent). */
+function shadeVar(v){
+  const d=Math.max(0, v|0); if(d<=0) return "";
+  const la=3*d, da=55*d;                                                           // light .03×depth · dark .055×depth (thousandths for the dark channel avoid float drift)
+  const lv=la>=100 ? "1" : "."+String(la).padStart(2,"0");
+  const dv=da>=1000 ? "1" : "."+String(da).padStart(3,"0");
+  return "--shade-l:rgba(146,65,255,"+lv+");--shade-d:rgba(169,112,255,"+dv+");";
+}
 function gmBtn(act, icon, title, o){ o=o||{}; return `<button type="button" class="gm${o.danger?" danger":""}" data-act="${act}" title="${esc(title)}"${o.disabled?" disabled":""}>${icon}</button>`; }
 function gripMenu(P, node, depth){
   const id=node.id, ind=canIndent(P,id), outd=canOutdent(P,id);
@@ -1183,6 +1249,7 @@ function renderGrid(rows){
 
 function renderTimeline(rows){
   const P=proj(), r=getRange(), ppd=pxPerDay();
+  const dark=domThemeDark();                            // §1.10 item 6 / T1: read the DOM attribute (single authority) — NOT effectiveTheme(). So export/print force html[data-theme]=light + re-render → these inline fills capture as light pastels (no dark leak).
   rows = rows || flatten(P);                            // R9: reuse renderBoard's flatten, or recompute for standalone calls
   const totalDays=daysBetween(r.start,r.end)+1, W=totalDays*ppd;
   let months="", cur=new Date(r.start);
@@ -1220,13 +1287,14 @@ function renderTimeline(rows){
       rowsHtml += `<div class="modBarRow" style="width:${W}px;${sh}" data-nid="${esc(n.id)}">${modBar}</div>`;
     } else if(row.type==="feature"){
       const f=n, pc=PALETTE[((row.parent&&row.parent.color)||0)%PALETTE.length]; // bar colour = parent container's palette (as v1.0.3)
+      const barFill=dark?hex2rgba(pc.chip,.22):pc.fill, barInk=dark?lighten(pc.chip,.62):pc.ink; // §1.10 item 6: dark = chip@.22 fill + pale chip-tint ink; light = pastel pc.fill / dark pc.ink (byte-identical to v1.0.3)
       const left=daysBetween(r.start,f.start)*ppd, w=Math.max(ppd,(daysBetween(f.start,f.end)+1)*ppd);
       const alt=(altCount++ %2)===1?"alt":""; const dur=daysBetween(f.start,f.end)+1; const st=stById(f.status);
       const tip=`${f.fid?f.fid+" · ":""}${f.name}\n${fmtThai(parse(f.start))} → ${fmtThai(parse(f.end))} (${dur} วัน)\nสถานะ: ${st.th}${f.remark?"\nหมายเหตุ: "+f.remark:""}`;
       const fs=barLabelPx(ppd), hide=labelHidden(ppd, w);   // §1.9 label font curve + hide (status-dot only) at small size/width
       const lblStyle=`font-size:${fs.toFixed(2)}px${hide?';display:none':''}`;
       const bw=Math.max(2, w-2);                            // H1: at PPD<2 a short bar's (w-2) goes NEGATIVE → invalid CSS → the width declaration drops and the .bar auto-sizes to its content (handles+dot+label). Floor at 2px (keeps the −2 inset for normal widths). Dates stay safe: the drag commits day deltas (onBarMove reads drag.oS/oE, never bar.style.width). .bar has overflow:hidden so the dot/handles stay clipped inside the 2px box.
-      rowsHtml += `<div class="barRow ${alt}" style="width:${W}px;${sh}" data-nid="${esc(f.id)}"><div class="bar" data-nid="${esc(f.id)}" data-tip="${esc(tip)}" style="left:${left+1}px;width:${bw}px;background:${pc.fill};border-color:${pc.border};color:${pc.ink}"><div class="handle l" data-mode="l"></div><span class="sdot" style="background:${st.color}"></span><span class="blabel" style="${lblStyle}">${esc(f.name)}</span><div class="handle r" data-mode="r"></div></div></div>`;
+      rowsHtml += `<div class="barRow ${alt}" style="width:${W}px;${sh}" data-nid="${esc(f.id)}"><div class="bar" data-nid="${esc(f.id)}" data-tip="${esc(tip)}" style="left:${left+1}px;width:${bw}px;background:${barFill};border-color:${pc.border};color:${barInk}"><div class="handle l" data-mode="l"></div><span class="sdot" style="background:${st.color}"></span><span class="blabel" style="${lblStyle}">${esc(f.name)}</span><div class="handle r" data-mode="r"></div></div></div>`;
     } else { // add-zone → 32px spacer aligned with the left addFeat row (1:1 panes); shade uses depth+1 to match the left addFeat
       rowsHtml += `<div class="barRow" style="width:${W}px;height:32px;border-bottom:1px solid var(--line);${shadeVar(row.depth+1)}" data-nid="${esc(n.id)}"></div>`;
     }
@@ -2062,6 +2130,11 @@ async function exportPng(){
   if(typeof html2canvas==="undefined"){ toast("ไลบรารี PNG โหลดไม่สำเร็จ (ต้องต่ออินเทอร์เน็ต)"); return; }
   const board=el("board"), L=el("leftScroll"), R=el("rightScroll");
   const pl=L.scrollTop, pr=R.scrollLeft; L.scrollTop=R.scrollTop=0; R.scrollLeft=0;
+  /* §1.10: exports FORCE LIGHT — stamp data-theme=light + re-render synchronously so the inline bar fills
+     capture as their light pastels (the dark tokens + dark bar branch never leak into the PNG). Restored in
+     `finally`. renderBoard re-runs the full R10 order (grid → timeline → wrap/heights → sticky labels). */
+  const root=document.documentElement, prevTheme=root.getAttribute("data-theme"), forcedLight=prevTheme!=="light";
+  if(forcedLight){ root.setAttribute("data-theme","light"); renderBoard(); L.scrollTop=R.scrollTop=0; R.scrollLeft=0; }
   updateStickyLabels();                                 // scroll is reset to 0 → clears sliding-label shifts so the snapshot shows labels at bar starts
   board.classList.add('exporting');
   const w=board.scrollWidth, h=Math.max(el("leftBody").scrollHeight, el("bars").scrollHeight)+el("leftHead").offsetHeight+4;
@@ -2070,7 +2143,11 @@ async function exportPng(){
     const c=await html2canvas(board,{backgroundColor:"#ffffff",scale:2,width:w,height:h,windowWidth:w+40,windowHeight:h+40,scrollX:0,scrollY:0,logging:false});
     const a=document.createElement('a'); a.download=safeName(proj().code||proj().name)+"_Timeline.png"; a.href=c.toDataURL("image/png"); a.click(); toast("ส่งออก PNG แล้ว");
   }catch(err){ console.error(err); toast("สร้าง PNG ไม่สำเร็จ"); }
-  finally{ board.classList.remove('exporting'); L.scrollTop=R.scrollTop=pl; R.scrollLeft=pr; updateStickyLabels(); } // restore scroll → re-apply the slide immediately
+  finally{
+    board.classList.remove('exporting');
+    if(forcedLight){ root.setAttribute("data-theme", prevTheme||effectiveTheme()); renderBoard(); } // restore the user's theme + re-render the inline bar fills
+    L.scrollTop=R.scrollTop=pl; R.scrollLeft=pr; updateStickyLabels();                              // restore scroll → re-apply the slide immediately
+  }
 }
 
 /* =====================  MODAL / TOAST  ===================== */
@@ -2177,9 +2254,12 @@ async function backupModal(){
 
 /* =====================  INIT  ===================== */
 Store.load();
+applyTheme();                                          // §1.10: stamp html[data-theme] from ui.theme BEFORE the first render (no light→dark flash)
 route();
 wireDragGuard();                                       // one centralized capture-phase pointerdown/up/cancel guard for background-sync deferral
 wireResizeGuard();                                     // H2: one debounced window-resize listener → refreshes the months-in-view readout (no re-render)
+wireThemeGuard();                                      // §1.10: AUTO mode re-applies the effective theme when the OS prefers-color-scheme flips (wired once)
+wirePrintGuard();                                      // §1.10 T2: force light + re-render inline bar fills on beforeprint, restore on afterprint (wired once; covers the Print button AND Cmd-P)
 window.addEventListener('hashchange', route);
 window.addEventListener('storage', e=>{ if(e.key===LS_KEY && !editingNow()){ Store.load(); route(); } }); // FIX: don't reload/re-render from a cross-tab write while a drag/resize or edit is in flight
 if(cloudOn()){ cloudSync(); window.addEventListener('focus', ()=>cloudPull(false)); setInterval(()=>cloudPull(false), 30000); }

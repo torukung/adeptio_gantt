@@ -81,16 +81,29 @@ test("FIX3: a live drag sets the interaction guard so a storage adopt is deferre
 
   // Begin (but do NOT finish) a feature-row drag: pointerdown on the grip, then move.
   // v1.0.4: rows addressed by data-nid (minimalDoc's first feature id = "fa1").
-  const gb = await boxOf(page, '.featRow[data-nid="fa1"] .grip');
+  // FLAKE ROOT CAUSE (hunted 2026-07-18): under full-suite load the topbar/toolbar can reflow LATE,
+  // shifting the grid down between a cached boundingBox read and the press — the press then lands on
+  // the ADJACENT module grip (also matches _DRAG_SEL, so _dragging latches) and starts a MODULE drag
+  // (.modGhost), never a row drag (.rowGhost). Fix: wait until the grip's y is stable across two
+  // rAF-spaced reads, take FRESH coords, and press with no sleep in between (stale window minimized).
+  const gripSel = '.featRow[data-nid="fa1"] .grip';
+  await expect.poll(async () => {
+    const a = await boxOf(page, gripSel);
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    const b = await boxOf(page, gripSel);
+    return Math.abs(a.y - b.y) < 0.5 && Math.abs(a.x - b.x) < 0.5 ? "stable" : "moving";
+  }).toBe("stable");
+  const gb = await boxOf(page, gripSel); // fresh coords, post-stability
   await page.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2);
-  await page.waitForTimeout(60); // settle: hovering the grip opens the stage-2 pill (clip-path transition); let hit-testing stabilize before the press so the drag start is deterministic under load
   await page.mouse.down();
   await page.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2 + 24, { steps: 5 }); // enter rowDrag
 
+  // Self-naming guard: if layout still shifted, the press starts a MODULE drag — fail with the cause.
+  expect(await page.locator(".modGhost").count(), "press landed on the module grip — grid shifted between measure and press").toBe(0);
   // The app reports it is interacting/editing, so cloudPull + the storage listener defer.
   expect(await page.evaluate(() => window["isInteracting"]())).toBe(true);
   expect(await page.evaluate(() => window["editingNow"]())).toBe(true);
-  await expect(page.locator(".rowGhost")).toHaveCount(1); // drag is live (auto-retrying: absorbs headless input jitter; a real drag failure still fails)
+  await expect(page.locator(".rowGhost")).toHaveCount(1); // drag is live (auto-retrying; a real drag failure still fails)
 
   // Simulate a cross-tab write of a DIFFERENT doc + the storage event that drives adoption.
   await page.evaluate((key) => {
@@ -149,8 +162,11 @@ test("FIX5: a failed localStorage write shows a warning toast (not silent)", asy
 
   // A mutation -> Store.save() -> safeSet() returns false -> one-time warning toast.
   await page.click('.modRow[data-nid="mod-a"] .caret[data-act="toggle"]');
-  await expect(page.locator("#toast")).toContainText("บันทึกลงเครื่องไม่สำเร็จ");
-  await expect(page.locator("#toast")).toHaveClass(/show/);
+  // Single ATOMIC assertion: the locator requires the `.show` class (toast is visible) AND the
+  // failure message is present — both protections in ONE auto-retrying check. Two sequential
+  // assertions could see the 2400ms auto-hide strip `.show` between them (a race); folding `.show`
+  // into the locator removes the gap without weakening either protection.
+  await expect(page.locator("#toast.show")).toContainText("บันทึกลงเครื่องไม่สำเร็จ");
 });
 
 /* ---------- FIX 6 — column widths are namespaced per project ---------- */

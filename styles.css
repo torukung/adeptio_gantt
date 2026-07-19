@@ -317,9 +317,12 @@ button{font-family:inherit; cursor:pointer;}
 /* Stage-2 (§1.9 left pane): stepped indent shading --shade = rgba(146,65,255, .03 × depth), and the
    ancestor rail-ladder width --ladderW = --step × ancestorCount. Both are pure BACKGROUND (drawn by
    the .modRow/.featRow/.addFeat background stacks above) → zero effect on row height (R11 alignment).
-   G6a: --shade is set INLINE per row by renderGrid (shadeVar) using the exact, UNBOUNDED .03×depth
-   formula — the old per-level class clamp is gone. This default is the depth-0 (no-tint) fallback. */
-.modRow,.featRow,.addFeat{ --shade:transparent; --ladderW:0px; }
+   G6a: --shade is set INLINE per row by renderGrid (shadeVar) using the exact, UNBOUNDED formula — the
+   old per-level class clamp is gone. §1.10 theme channel: shadeVar emits BOTH --shade-l (light) and
+   --shade-d (dark) inline; --shade resolves to --shade-l here and to --shade-d under [data-theme="dark"]
+   (see the dark block near the end), so pane-parity holds in both themes with no re-render on switch.
+   This default is the depth-0 (no-tint) fallback. */
+.modRow,.featRow,.addFeat{ --shade-l:transparent; --shade-d:transparent; --shade:var(--shade-l); --ladderW:0px; }
 .subMod{ --ladderW:calc(var(--step) * (var(--lvl) - 1)); }                 /* container: one pass-through rail per ancestor level */
 .featRow.subScope, .addFeat.subScope{ --ladderW:calc(var(--step) * (var(--lvl) - 2)); }
 /* v1.0.4 — PROPORTIONAL indent at ANY depth (R11): each row carries an inline --lvl = its
@@ -394,8 +397,9 @@ button{font-family:inherit; cursor:pointer;}
    Painted as a background-IMAGE layer so it coexists with the alt-row stripe (background-COLOR below), the
    weekend bands + grid lines in #gridLayer beneath, and is never wiped by a `background:` shorthand (the
    Stage-2 G3 landmine). Bars/modBars are absolutely-positioned children → the shade always sits under them.
-   depth 0 ⇒ --shade transparent (falls back to the default) so the gridLayer shows through unchanged. */
-.modBarRow,.barRow{ --shade:transparent; }
+   depth 0 ⇒ --shade transparent (falls back to the default) so the gridLayer shows through unchanged.
+   §1.10 theme channel: like the left pane, --shade resolves to --shade-l here / --shade-d under dark. */
+.modBarRow,.barRow{ --shade-l:transparent; --shade-d:transparent; --shade:var(--shade-l); }
 .barRow{position:relative; height:var(--rowH); border-bottom:1px solid var(--line);
   background-color:transparent;
   background-image:linear-gradient(var(--shade),var(--shade));
@@ -561,3 +565,152 @@ button{font-family:inherit; cursor:pointer;}
 .kc-x .pmDel{width:22px; height:22px; border:1px solid transparent; background:transparent; border-radius:7px; display:flex; align-items:center; justify-content:center; color:var(--ink-faint); cursor:pointer;}
 .kc-x .pmDel:hover{color:var(--ruby-adpt); border-color:#f3c2cf;}
 @media (max-width:680px){ .kpiHead{display:none;} }
+
+/* ============================================================================
+   DARK THEME (v1.0.4 §1.10) — behind html[data-theme="dark"] (set by app.js from ui.theme).
+   Light stays byte-identical: every rule below is an ADDITIVE override, prefixed with
+   html[data-theme="dark"] so it always out-specifies its light counterpart, and the WHOLE
+   section sits inside @media screen — so PRINT never matches these selectors and reverts to
+   the :root light tokens (item 7: exports/print force light; the PNG path ALSO forces light in JS
+   for html2canvas, which renders in screen media). PALETTE chips/bars + STATUS colours are left
+   as-is (verified legible on both grounds). Contrast (WCAG, computed): ink/surface 15.6, ink/panel
+   14.5, ink-soft/panel 8.2, ink-faint/panel 5.4, worst bar ink-on-fill 7.96, status dots ≥5.3,
+   primary #a970ff/panel 5.3 — all ≥ target.
+   ============================================================================ */
+@media screen{
+  /* ---- token set: the dark ground (prototype §1.10) ---- */
+  html[data-theme="dark"]{
+    color-scheme:dark;                                  /* native form controls, scrollbars, date pickers render dark + legible */
+    --ink:#eceaf3; --ink-soft:#b4b0c2; --ink-faint:#918da0;
+    --surface:#131218; --panel:#1b1a22;
+    --line:#2b2934; --line-strong:#3a3747;
+    --weekend:rgba(255,255,255,.04);
+    --primary:#a970ff; --primary-ink:#c7a3ff; --primary-soft:rgba(169,112,255,.20);
+    --today:#ff4a7b; --today-soft:rgba(255,74,123,.18);
+    --good:#3ef2b1;
+    --violet-adpt:#a970ff;                              /* accent brightened for the dark ground (drop marks, focus rings, hovers, eyebrow) */
+    --smoke-adpt:#201e27;
+    --rail:rgba(169,112,255,.45);
+    /* elevation deepened */
+    --shadow-chip:0 6px 16px rgba(0,0,0,.55);
+    --shadow:0 14px 34px rgba(0,0,0,.5);
+    --shadow-hover:0 24px 48px rgba(0,0,0,.62);
+    --shadow-bar:0 1px 0 rgba(255,255,255,.05) inset, 0 2px 5px rgba(0,0,0,.55);
+    /* control-surface tokens — dark counterparts of the light #fff / #f4f4f8 hardcodes */
+    --ctl:#242231; --ctl-hi:#2e2b3c;
+    --mod-grad-a:#232030; --mod-grad-b:#1d1b26;         /* module-band base gradient (modRow / modBarRow) */
+  }
+
+  /* ---- §1.6/§1.9 stepped shade — swap the resolved channel to the dark formula (parity holds both panes) ---- */
+  html[data-theme="dark"] .modRow, html[data-theme="dark"] .featRow, html[data-theme="dark"] .addFeat,
+  html[data-theme="dark"] .modBarRow, html[data-theme="dark"] .barRow{ --shade:var(--shade-d); }
+
+  /* ---- control / input surfaces (light background:#fff → --ctl) ---- */
+  html[data-theme="dark"] #sumText,
+  html[data-theme="dark"] .sumDateWrap input[type=date],
+  html[data-theme="dark"] .statusSel,
+  html[data-theme="dark"] .cell input[type=date]:hover,
+  html[data-theme="dark"] .cell input[type=date]:focus,
+  html[data-theme="dark"] .cell .txt:focus,
+  html[data-theme="dark"] .field input[type=text],
+  html[data-theme="dark"] .field input[type=date],
+  html[data-theme="dark"] .field textarea,
+  html[data-theme="dark"] .field select,
+  html[data-theme="dark"] .mpList,
+  html[data-theme="dark"] .histItem input[type=date],
+  html[data-theme="dark"] .histItem textarea,
+  html[data-theme="dark"] .kpiNum,
+  html[data-theme="dark"] .kc-detail .kpiText, html[data-theme="dark"] .kc-remark .kpiText,
+  html[data-theme="dark"] .kpiSel,
+  html[data-theme="dark"] .btn,
+  html[data-theme="dark"] .seg,
+  html[data-theme="dark"] .tabBtn,
+  html[data-theme="dark"] .ph-chip,
+  html[data-theme="dark"] .colHead .colTool,
+  html[data-theme="dark"] .btn.danger,
+  html[data-theme="dark"] .btn.details.gray{ background:var(--ctl); }
+
+  /* native date pickers / selects → dark (the light rules force color-scheme:light) */
+  html[data-theme="dark"] .sumDateWrap input[type=date],
+  html[data-theme="dark"] .cell input[type=date],
+  html[data-theme="dark"] .field input[type=date],
+  html[data-theme="dark"] .field select,
+  html[data-theme="dark"] .histItem input[type=date],
+  html[data-theme="dark"] .statusSel,
+  html[data-theme="dark"] .kpiSel{ color-scheme:dark; }
+
+  /* ---- elevated surfaces: popovers, ghosts, hover elevation (--ctl-hi) ---- */
+  html[data-theme="dark"] .gripPill,
+  html[data-theme="dark"] .rowGhost,
+  html[data-theme="dark"] .progGhost,
+  html[data-theme="dark"] .iconbtn:hover,
+  html[data-theme="dark"] .btn.details.gray:hover{ background:var(--ctl-hi); }
+  html[data-theme="dark"] .modGhost{ background:linear-gradient(180deg, var(--mod-grad-a), var(--mod-grad-b)); }
+
+  /* ---- the DS “black” hover states invert on dark (black is invisible on a dark ground) ---- */
+  html[data-theme="dark"] .btn:hover{ background:var(--ctl-hi); border-color:var(--ink); color:var(--ink); }
+  html[data-theme="dark"] .btn.primary:hover{ background:var(--ink); color:var(--surface); border-color:var(--ink); }
+  html[data-theme="dark"] .seg button:hover{ color:var(--ink); }
+  html[data-theme="dark"] .tabBtn:hover{ color:var(--ink); border-color:var(--ink); }
+  /* (active seg/tab stay #000 + bright green — reads as recessed-selected against the lighter --ctl pills) */
+
+  /* ---- focus rings: light uses black + a black-alpha ring → primary violet on dark ---- */
+  html[data-theme="dark"] #sumText:focus,
+  html[data-theme="dark"] .field input:focus, html[data-theme="dark"] .field textarea:focus,
+  html[data-theme="dark"] .histItem textarea:focus{ border-color:var(--primary); box-shadow:0 0 0 2px var(--primary-soft); }
+  html[data-theme="dark"] .kpiNum:focus, html[data-theme="dark"] .kpiText:focus, html[data-theme="dark"] .kpiSel:focus{ box-shadow:0 0 0 2px rgba(169,112,255,.30); }
+
+  /* ---- hover / drop-mark tints — background-COLOR only (keep the rail-ladder + shade image layers) ---- */
+  html[data-theme="dark"] .progRow:hover,
+  html[data-theme="dark"] .kpiRow.progRow:hover{ background:rgba(169,112,255,.09); }
+  html[data-theme="dark"] .featRow:hover{ background-color:rgba(169,112,255,.055); }
+  html[data-theme="dark"] .addFeat:hover{ background-color:rgba(169,112,255,.07); }
+  html[data-theme="dark"] .addFeat.dropInto{ background-color:rgba(169,112,255,.16); }
+  html[data-theme="dark"] .modRow.modDropBefore, html[data-theme="dark"] .modRow.modDropAfter{ background-color:rgba(169,112,255,.16); }
+  html[data-theme="dark"] .featRow.dropBefore, html[data-theme="dark"] .featRow.dropAfter{ background-color:rgba(169,112,255,.14); }
+  html[data-theme="dark"] .barRow.alt{ background-color:rgba(255,255,255,.022); }   /* was rgba(20,22,30,.012): dark-on-light → light-on-dark */
+
+  /* ---- module-band base gradients (re-declare the image stack to swap ONLY the base layer; --rail/--shade adapt via tokens) ---- */
+  html[data-theme="dark"] .modRow{
+    background-image:
+      repeating-linear-gradient(90deg, var(--rail) 0 2px, transparent 2px var(--step)),
+      linear-gradient(var(--shade), var(--shade)),
+      linear-gradient(180deg, var(--mod-grad-a), var(--mod-grad-b));
+  }
+  html[data-theme="dark"] .modBarRow{
+    background-image:
+      linear-gradient(var(--shade), var(--shade)),
+      linear-gradient(180deg, rgba(35,32,48,.66), rgba(29,27,38,.66));   /* translucent so grid lines + today-line show through */
+  }
+  html[data-theme="dark"] .monthBand{ background:linear-gradient(180deg, #211f2b, #191822); }
+
+  /* ---- progress track (light greys → dark) ---- */
+  html[data-theme="dark"] .pbar{ background:#2b2934; }
+  html[data-theme="dark"] .sw.track{ background:#3a3747; }
+
+  /* ---- KPI state badges: pale tag bg → translucent tinted dark + a light-tint text (keep the semantics) ---- */
+  html[data-theme="dark"] .kpiBadge.k-none{ background:rgba(255,255,255,.07); color:var(--ink-soft); }
+  html[data-theme="dark"] .kpiBadge.k-ontrack{ background:rgba(0,206,131,.16); color:#5ce9b4; }
+  html[data-theme="dark"] .kpiBadge.k-delay{ background:rgba(255,171,64,.16); color:#ffca86; }
+  html[data-theme="dark"] .kpiBadge.k-block{ background:rgba(255,74,123,.18); color:#ff9db4; }
+  html[data-theme="dark"] .kpiBadge.k-done{ background:rgba(79,152,255,.18); color:#a7c8ff; }
+
+  /* ---- danger affordances: the light pale-red hovers (#c0392b/#f3dada/#e9c4bf/#f3c2cf/#fff0f4) → dark-coherent translucent red + bright ruby ---- */
+  html[data-theme="dark"] .iconbtn.danger:hover{ background:rgba(255,74,123,.14); color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); }
+  html[data-theme="dark"] .colHead .delcol:hover{ background:rgba(255,74,123,.18); color:#ff9db4; }
+  html[data-theme="dark"] .btn.danger:hover{ background:rgba(255,74,123,.14); }
+  /* the two sibling #f3c2cf danger hovers (grip-menu delete pill + KPI-table row delete) — same idiom as .iconbtn.danger:hover */
+  html[data-theme="dark"] .gripPill > button.gm.danger:hover{ background:rgba(255,74,123,.14); color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); }
+  html[data-theme="dark"] .kc-x .pmDel:hover{ background:rgba(255,74,123,.14); color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); }
+
+  /* ---- bar chrome on dark: light-tint the drag-handle nub + drop the white label halo ---- */
+  html[data-theme="dark"] .bar .blabel{ text-shadow:0 1px 2px rgba(0,0,0,.5); }
+  html[data-theme="dark"] .handle:after{ background:rgba(255,255,255,.4); }
+
+  /* ---- column-resize affordance brightened ---- */
+  html[data-theme="dark"] .colHead .colResize:hover{ background:linear-gradient(90deg,transparent,rgba(169,112,255,.35)); }
+  html[data-theme="dark"] .colHead .colResize.dragging{ background:linear-gradient(90deg,transparent,rgba(169,112,255,.6)); }
+
+  /* ---- dashboard card foot ---- */
+  html[data-theme="dark"] .card .foot{ background:var(--surface); }
+}
