@@ -50,11 +50,69 @@ function startOfMonth(d){ return new Date(d.getFullYear(),d.getMonth(),1); }
 function endOfMonth(d){ return new Date(d.getFullYear(),d.getMonth()+1,0); }
 function today(){ const t=new Date(); return new Date(t.getFullYear(),t.getMonth(),t.getDate()); }
 const LS_UI = "adeptio_ptrack_ui";
-const ui = { zoom:"week", cal:"CE", wrapTxt:false, colW:{} };
-try{ const _u=JSON.parse(localStorage.getItem(LS_UI)||"{}"); if(_u && typeof _u==="object"){ if("wrapTxt" in _u) ui.wrapTxt=!!_u.wrapTxt; if(_u.colW && typeof _u.colW==="object") ui.colW=_u.colW; } }catch(e){}
+/* v1.0.4 §1.8 / R12 — continuous Gantt zoom: px-per-day (PPD) ∈ [0.9,34], persisted per-device in
+   `ui` (LS_UI), NEVER in the doc. The three legacy day/week/month presets survive only as shortcuts
+   that set an exact PPD (Day→34, Week→11, Month→4.4, clamped into range). */
+const PPD_MIN=0.9, PPD_MAX=34;
+const PRESET_PPD={ day:34, week:11, month:4.4 };
+function clampPpd(v){ v=+v; if(!isFinite(v)) v=PRESET_PPD.week; return Math.max(PPD_MIN, Math.min(PPD_MAX, v)); }
+const THEME_MODES = ["auto","light","dark"];                                                            // §1.10/R12: theme mode set (sanitizer domain)
+const ui = { cal:"CE", wrapTxt:false, colW:{}, ppd:PRESET_PPD.week, theme:"auto" };  // default zoom = week (11px/day), same as v1.0.3; default theme = auto (follow OS)
+try{ const _u=JSON.parse(localStorage.getItem(LS_UI)||"{}"); if(_u && typeof _u==="object"){
+  if("wrapTxt" in _u) ui.wrapTxt=!!_u.wrapTxt;
+  if(_u.colW && typeof _u.colW==="object") ui.colW=_u.colW;
+  if("ppd" in _u && _u.ppd!=null && isFinite(+_u.ppd)) ui.ppd=clampPpd(_u.ppd);                        // R12: restore continuous zoom, sanitized into [0.9,34]
+  else if(typeof _u.zoom==="string" && PRESET_PPD[_u.zoom]!=null) ui.ppd=clampPpd(PRESET_PPD[_u.zoom]); // legacy: a stored preset string maps to its PPD ONCE (saveUi no longer writes `zoom`, so it drops next save)
+  if(typeof _u.theme==="string" && THEME_MODES.includes(_u.theme)) ui.theme=_u.theme;                  // R12: restore theme, sanitized to {auto,light,dark}; anything else → default 'auto'
+} }catch(e){}
 /* FIX: colW is now namespaced per project ({pid:{key:w}}). Drop any legacy flat {key:w} (numeric top-level values) so old widths can't bleed across projects or corrupt the nested shape. */
 if(ui.colW && Object.keys(ui.colW).some(k=>typeof ui.colW[k]==="number")) ui.colW={};
-function saveUi(){ try{ localStorage.setItem(LS_UI, JSON.stringify({wrapTxt:!!ui.wrapTxt, colW:ui.colW||{}})); }catch(e){} }
+function saveUi(){ try{ localStorage.setItem(LS_UI, JSON.stringify({wrapTxt:!!ui.wrapTxt, colW:ui.colW||{}, ppd:clampPpd(ui.ppd), theme:(THEME_MODES.includes(ui.theme)?ui.theme:"auto")})); }catch(e){} } // R12: persist ppd + theme beside wrapTxt/colW; never the doc, and no legacy `zoom` key
+
+/* ---------- THEME (v1.0.4 §1.10 / R12): Auto / Light / Dark ----------
+   Per-device in `ui` (LS_UI), NEVER in the doc. 'auto' follows the OS prefers-color-scheme; explicit
+   light/dark OVERRIDE it (both directions, §5.4). The EFFECTIVE theme is written as a CONCRETE
+   'light'|'dark' onto document.documentElement[data-theme] — that attribute drives (a) the dark token
+   block + scattered [data-theme="dark"] overrides in styles.css, and (b) the inline dark bar-fill branch
+   in renderTimeline. A switch re-renders the board because bar fills are inline (not token-driven). */
+function prefersDark(){ try{ return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches); }catch(e){ return false; } }
+function effectiveTheme(){ const t=THEME_MODES.includes(ui.theme)?ui.theme:"auto"; return (t==="dark" || (t==="auto" && prefersDark())) ? "dark" : "light"; }
+function syncThemeSeg(){ document.querySelectorAll("[data-theme-set]").forEach(b=> b.classList.toggle("on", b.dataset.themeSet===ui.theme)); } // segmented control reflects ui.theme
+function applyTheme(){ document.documentElement.setAttribute("data-theme", effectiveTheme()); syncThemeSeg(); }                        // idempotent: (re)stamp the root + refresh the control
+function domThemeDark(){ return document.documentElement.getAttribute("data-theme")==="dark"; }                                       // §1.10 T1: the DOM attribute is the SINGLE render-time authority — render code READS it; effectiveTheme() only decides what applyTheme()/export/print WRITE. So a forced-light export/print re-render is automatically consistent (no dark fills leak into the PNG/print).
+function rerenderForTheme(){ if(el("leftBody")) renderBoard(); else if(el("rowsLayer")) renderTimeline(); }                           // rebuild inline bar fills (timeline tab only; summary/dashboard are pure-token → CSS handles them)
+function setTheme(mode){                                                                                                              // control handler: persist + apply + re-render (NOT via apply() — no doc mutation)
+  ui.theme = THEME_MODES.includes(mode) ? mode : "auto"; saveUi();
+  applyTheme(); rerenderForTheme();
+}
+let _themeGuardWired=false, _themeFlipT=null;
+function wireThemeGuard(){                                                                                                            // AUTO mode: re-apply the effective theme when the OS scheme flips (wired ONCE, like wireDragGuard/wireResizeGuard)
+  if(_themeGuardWired) return; _themeGuardWired=true;
+  try{ const mq=window.matchMedia("(prefers-color-scheme: dark)");
+    const onFlip=()=>{
+      if(ui.theme!=="auto") return;                                                                                                  // only auto follows the OS; explicit light/dark ignore the flip
+      applyTheme();                                                                                                                  // T3: stamp the ATTRIBUTE immediately (cheap, CSS-correct) — even mid-edit; token-driven surfaces adapt at once, and the write is safe to interleave with an open contenteditable
+      const rerender=()=>{ if(editingNow()){ _themeFlipT=setTimeout(rerender, 400); return; } _themeFlipT=null; rerenderForTheme(); }; // T3: defer the innerHTML rebuild while an edit is in flight (a mid-edit rebuild drops uncommitted contenteditable text — every other async re-render path defers via editingNow()); retry until idle, then re-render ONCE to the latest state
+      clearTimeout(_themeFlipT); rerender();                                                                                         // reuse ONE handle so rapid OS flips never stack timers
+    };
+    if(mq.addEventListener) mq.addEventListener("change", onFlip); else if(mq.addListener) mq.addListener(onFlip);                    // addListener fallback for older engines
+  }catch(e){}
+}
+/* §1.10 T2: PRINT while dark leaks the INLINE dark bar fills — the @media screen wrap reverts CSS tokens for
+   print but inline styles survive. Wired ONCE (like wireThemeGuard). beforeprint runs BEFORE Chromium paints
+   the print view, so stamping light + a synchronous renderBoard() rebuilds the inline fills as light pastels
+   in time; afterprint restores the user's theme. Covers the menu Print button AND the Cmd-P/browser path. */
+let _printGuardWired=false, _printForcedLight=false;
+function wirePrintGuard(){
+  if(_printGuardWired) return; _printGuardWired=true;
+  window.addEventListener("beforeprint", ()=>{ if(domThemeDark()){ document.documentElement.setAttribute("data-theme","light"); renderBoard(); _printForcedLight=true; } }); // force light + rebuild inline fills synchronously
+  window.addEventListener("afterprint",  ()=>{ if(_printForcedLight){ _printForcedLight=false; applyTheme(); rerenderForTheme(); } });                                        // restore the attribute + re-render the dark inline fills
+}
+/* Palette colour maths for the dark bar-fill branch (§1.10 item 6): a translucent chip fill over the dark
+   board + a light chip-tint ink for legibility. Light theme keeps the pastel pc.fill / dark pc.ink as-is. */
+function hex2rgb(h){ h=String(h==null?"":h).trim().replace(/^#/,""); if(h.length===3) h=h.split("").map(c=>c+c).join(""); const n=parseInt(h||"000000",16); return isNaN(n)?[0,0,0]:[(n>>16)&255,(n>>8)&255,n&255]; }
+function hex2rgba(h,a){ const c=hex2rgb(h); return "rgba("+c[0]+","+c[1]+","+c[2]+","+a+")"; }
+function lighten(h,amt){ const c=hex2rgb(h), m=x=>Math.round(x+(255-x)*amt); return "rgb("+m(c[0])+","+m(c[1])+","+m(c[2])+")"; } // mix toward white by amt∈[0,1]
 function dispYear(d){ return ui.cal==="BE" ? d.getFullYear()+543 : d.getFullYear(); }
 function monName(mi){ return ui.cal==="BE" ? TH_MON[mi] : EN_MON[mi]; }
 function fmtThai(d){ return d.getDate()+" "+monName(d.getMonth())+" "+String(dispYear(d)).slice(-2); }
@@ -84,6 +142,9 @@ const IC = {
   restore: ic('<path d="M3 12a9 9 0 109-9 9 9 0 00-7 3.3M3 4v3.5h3.5"/><path d="M12 8v4l3 2"/>'),
   link:  ic('<path d="M9 15l6-6M10.5 6.5l1-1a4 4 0 015.95 5.3l-1.2 1.2M13.5 17.5l-1 1a4 4 0 01-5.95-5.3l1.2-1.2"/>'),
   wrap:  ic('<path d="M3 6h18"/><path d="M3 12h15a3 3 0 010 6h-4"/><path d="M17 15l-3 3 3 3"/><path d="M3 18h6"/>'),
+  indent:  ic('<path d="M4 6h16M4 12h9M4 18h16"/><path d="M15 8.5l3.5 3.5-3.5 3.5"/>'),   // ⇥ tuck under previous sibling (Indent)
+  outdent: ic('<path d="M4 6h16M11 12h9M4 18h16"/><path d="M8.5 8.5L5 12l3.5 3.5"/>'),   // ⇤ lift to grandparent level (Outdent)
+  promote: ic('<path d="M8 8l4-4 4 4M8 16l4 4 4-4"/>'),                                   // ⇄ convert Feature ⇆ Module (promote/demote)
 };
 
 /* =====================  STORE (local-first, optional cloud sync)  ===== */
@@ -110,9 +171,10 @@ const Store = {
     const raw = safeGet();
     if(raw){ try{ DB = JSON.parse(raw); }catch(e){ DB=null; } }
     if(!DB){ DB = MEM || seedDB(); }
+    migrateDB(DB);                                    // v1.0.4: flat modules+parentId → recursive node tree (idempotent, per project)
     MEM = DB; return DB;
   },
-  save(){ const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); } // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
+  save(){ writeMirror(DB); const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); } // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
 };
 function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
 
@@ -137,6 +199,14 @@ function wireDragGuard(){                                                       
   document.addEventListener('pointerup', endDrag, true);
   document.addEventListener('pointercancel', endDrag, true);
 }
+/* H2: the months-in-view readout depends on #rightScroll.clientWidth, which changes on a window resize
+   with NO re-render. One debounced resize listener (wired once, like wireDragGuard) refreshes the readout
+   only — never a re-render. */
+let _resizeGuardWired=false, _resizeT=0;
+function wireResizeGuard(){                                                            // register ONCE; idempotent even if startup ran twice
+  if(_resizeGuardWired) return; _resizeGuardWired=true;
+  window.addEventListener('resize', ()=>{ clearTimeout(_resizeT); _resizeT=setTimeout(()=>{ if(el("rightScroll")) syncZoomUI(); }, 150); }); // debounced ~150ms; readout refresh ONLY when the timeline is present
+}
 function schedulePush(){ pushPending=true; clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, 800); }
 async function cloudPush(){
   if(!cloudOn()) return;
@@ -159,7 +229,7 @@ function editingNow(){
   if(el("historyOverlay") && el("historyOverlay").style.display==="flex") return true;
   return false;
 }
-function adoptRemote(doc, rev){ DB=doc; MEM=DB; safeSet(JSON.stringify(DB)); setLsRev(rev); route(); }
+function adoptRemote(doc, rev){ DB=doc; migrateDB(DB); MEM=DB; writeMirror(DB); safeSet(JSON.stringify(DB)); setLsRev(rev); route(); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent)
 async function cloudPull(force){
   if(!cloudOn()) return false;
   try{
@@ -277,15 +347,18 @@ function seedDB(){
 }
 
 /* =====================  PROGRESS MODEL  ===================== */
+/* §4 consistency — stats roll up recursively: a container's stats span EVERY
+   descendant feature (direct + nested sub-container features) via the shared
+   containerFeatures() walk, so create/move/delete can never disagree with display. */
 function moduleStats(m){
-  let total=m.features.length, done=0, started=0;
-  m.features.forEach(f=>{ if(f.status==="done") done++; else if(f.status!=="not_started") started++; });
+  const feats=containerFeatures(m); const total=feats.length; let done=0, started=0;
+  feats.forEach(f=>{ if(f.status==="done") done++; else if(f.status!=="not_started") started++; });
   const ns=total-done-started, pc=n=> total? Math.round(n/total*100):0;
   return {total, done, started, notStarted:ns, donePct:pc(done), startedPct:pc(started), notPct:pc(ns)};
 }
 function aggregateStats(mods){
   let total=0, done=0, started=0;
-  mods.forEach(m=> m.features.forEach(f=>{ total++; if(f.status==="done") done++; else if(f.status!=="not_started") started++; }));
+  mods.forEach(m=> containerFeatures(m).forEach(f=>{ total++; if(f.status==="done") done++; else if(f.status!=="not_started") started++; }));
   const ns=total-done-started, pc=n=> total? Math.round(n/total*100):0;
   return {total, done, started, notStarted:ns, donePct:pc(done), startedPct:pc(started), notPct:pc(ns)};
 }
@@ -344,12 +417,12 @@ function route(){
 
 /* =====================  DASHBOARD  ===================== */
 function renderDashboard(){
-  DB.projects.forEach(normalizeModules);
+  DB.projects.forEach(normalizeTree);
   const ps = DB.projects;
   const cards = ps.map(p=>{
     const pc = PALETTE[p.color%PALETTE.length];
     let mn=null, mx=null, nFeat=0;
-    p.modules.forEach(m=>m.features.forEach(f=>{ nFeat++; const s=parse(f.start),e=parse(f.end); if(!mn||s<mn)mn=s; if(!mx||e>mx)mx=e; }));
+    walkFeatures(p, f=>{ nFeat++; const s=parse(f.start),e=parse(f.end); if(!mn||s<mn)mn=s; if(!mx||e>mx)mx=e; }); // recursive: count every descendant feature + derive the date range
     const range = mn ? `${monName(mn.getMonth())} ${String(dispYear(mn)).slice(-2)} – ${monName(mx.getMonth())} ${String(dispYear(mx)).slice(-2)}` : "—";
     const cur = p.summary && p.summary.current;
     const vmods = progressModules(p);
@@ -438,7 +511,7 @@ function projectModal(id){
       const slug=(code||name).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")||("proj-"+_seq);
       let pid=slug, n=2; while(DB.projects.some(p=>p.id===pid)){ pid=slug+"-"+n; n++; }
       DB.projects.push({ id:pid, name, client, code, color, createdAt:iso(today()), updatedAt:iso(today()),
-        customCols:[], progressOrder:[], summary:{current:{id:nid(),date:iso(today()),text:""},history:[]}, modules:[] });
+        customCols:[], progressOrder:[], summary:{current:{id:nid(),date:iso(today()),text:""},history:[]}, modules:[], docVer:2 }); // v1.0.4: new projects are already tree-shaped
     }
     Store.save(); closeModal(); renderDashboard(); toast(editing?"บันทึกแล้ว":"สร้างโครงการแล้ว");
   };
@@ -460,13 +533,22 @@ function renderProject(){
         <button class="tabBtn" data-tab="timeline" title="ไทม์ไลน์และ Gantt">${IC.gantt}<span>ไทม์ไลน์</span></button>
       </nav>
       <div class="spring"></div>
+      <div class="toolgroup">
+        <div class="seg" id="themeSeg" role="group" aria-label="ธีม">
+          <span class="lbl">ธีม</span>
+          <button data-theme-set="auto" title="อัตโนมัติ — ตามระบบ">อัตโนมัติ</button>
+          <button data-theme-set="light" title="สว่าง">สว่าง</button>
+          <button data-theme-set="dark" title="มืด">มืด</button>
+        </div>
+      </div>
       <div class="toolgroup tlOnly">
         <span class="gl">Scroll</span>
         <div class="seg"><button id="colLeft" title="เลื่อนคอลัมน์ซ้าย">◀</button><span class="lbl">Cols</span><button id="colRight" title="เลื่อนคอลัมน์ขวา">▶</button></div>
         <div class="seg"><button id="chLeft" title="เลื่อนชาร์ตซ้าย">◀</button><span class="lbl">Chart</span><button id="chRight" title="เลื่อนชาร์ตขวา">▶</button></div>
       </div>
       <div class="toolgroup tlOnly">
-        <div class="seg"><span class="lbl">Zoom</span><button data-zoom="day">Day</button><button data-zoom="week" class="on">Week</button><button data-zoom="month">Month</button></div>
+        <div class="seg"><span class="lbl">Zoom</span><button data-zoom="day">Day</button><button data-zoom="week">Week</button><button data-zoom="month">Month</button></div>
+        <div class="seg zoomCtl"><button id="zoomOut" title="ซูมออก">−</button><span class="lbl" id="zoomReadout">— เดือน</span><button id="zoomIn" title="ซูมเข้า">+</button><button id="zoomFit" title="พอดี ~9 เดือน">พอดี</button></div>
         <div class="seg"><button data-cal="CE" class="on">ค.ศ.</button><button data-cal="BE">พ.ศ.</button></div>
         <button class="btn sm" id="btnToday">Today</button>
       </div>
@@ -545,7 +627,13 @@ function wireBoard(){
 
 function wireProjectControls(){
   document.querySelectorAll('.tabBtn').forEach(b=> b.onclick=()=> switchTab(b.dataset.tab));
-  document.querySelectorAll('[data-zoom]').forEach(b=>b.onclick=()=>{ ui.zoom=b.dataset.zoom; document.querySelectorAll('[data-zoom]').forEach(x=>x.classList.toggle('on',x===b)); renderTimeline(); });
+  document.querySelectorAll('[data-theme-set]').forEach(b=> b.onclick=()=> setTheme(b.dataset.themeSet)); // §1.10 Auto/Light/Dark — persist + apply + re-render (theme applies globally via the root attribute)
+  applyTheme();                                                                                          // re-stamp the root + light the active theme button for this freshly-built toolbar
+  document.querySelectorAll('[data-zoom]').forEach(b=>b.onclick=()=> applyZoom(PRESET_PPD[b.dataset.zoom]));   // preset → exact PPD, centred; syncZoomUI drives the active state
+  { const zi=el("zoomIn"), zo=el("zoomOut"), zf=el("zoomFit");
+    if(zi) zi.onclick=()=> applyZoom(pxPerDay()*1.35);   // §1.8 step ×1.35, centred on the viewport midpoint
+    if(zo) zo.onclick=()=> applyZoom(pxPerDay()/1.35);   // step ÷1.35
+    if(zf) zf.onclick=()=> applyZoom(fitPpd()); }         // reset = fit ≈ 9 months
   document.querySelectorAll('[data-cal]').forEach(b=>b.onclick=()=>{ ui.cal=b.dataset.cal; document.querySelectorAll('[data-cal]').forEach(x=>x.classList.toggle('on',x===b)); updateMeta(); if(ui.tab==="timeline") renderTimeline(); });
   el("btnToday").onclick = ()=>{ const R=el("rightScroll"); if(!R) return; const r=getRange(), t=today(); if(t<r.start||t>r.end){ toast("วันนี้อยู่นอกช่วงของแผน"); return;} const x=daysBetween(r.start,t)*pxPerDay(); R.scrollTo({left:Math.max(0,x-R.clientWidth/2),behavior:'smooth'}); };
   el("colLeft").onclick = ()=>{ const e2=el("leftScroll"); if(e2) e2.scrollBy({left:-220,behavior:'smooth'}); };
@@ -585,6 +673,7 @@ function onSplitUp(){
   document.body.style.userSelect=''; document.body.style.cursor=''; el("splitter").classList.remove('drag');
   const P=proj(); if(P){ P.leftW=Math.round(el("leftScroll").getBoundingClientRect().width); Store.save(); }
   split=null;
+  syncZoomUI();                                      // H2: the splitter changes #rightScroll.clientWidth without a re-render → refresh the months-in-view readout (no re-render)
 }
 
 /* =====================  STATUS & SUMMARY  ===================== */
@@ -656,10 +745,11 @@ function renderProgress(){
       <span class="kc kc-x"></span>
     </div>`;
     const rows=mods.map(m=>{
-      const s=moduleStats(m), k=kpiOf(m), st=kpiState(m,s), isSub=m.parentId!=null;
+      const s=moduleStats(m), k=kpiOf(m), st=kpiState(m,s);
       const tip=`เสร็จ ${s.donePct}% · กำลังทำ ${s.startedPct}% · ยังไม่เริ่ม ${s.notPct}% (${s.total} งาน)`;
+      // §4: progress lists TOP-LEVEL containers only (progressModules → root nodes); the v1.0.3 "↳" sub rows are gone.
       return `<div class="kpiRow progRow" data-mid="${m.id}">
-        <span class="kc kc-name"><span class="pgrip" data-act="progdrag" title="ลากเพื่อจัดลำดับการแสดงผล">${IC.grip}</span><span class="pmName" title="${esc(m.name)}">${isSub?'↳ ':''}${esc(m.name)}</span></span>
+        <span class="kc kc-name"><span class="pgrip" data-act="progdrag" title="ลากเพื่อจัดลำดับการแสดงผล">${IC.grip}</span><span class="pmName" title="${esc(m.name)}">${esc(m.name)}</span></span>
         <span class="kc kc-bar"><span class="pbar" title="${tip}">${barSeg(s)}</span><span class="kc-auto mono" title="${tip}">${s.donePct}%</span></span>
         <span class="kc kc-num"><input type="number" class="kpiNum" min="0" max="100" step="5" data-f="target" data-mid="${m.id}" value="${k.target==null?'':k.target}" placeholder="—"/></span>
         <span class="kc kc-num"><input type="number" class="kpiNum" min="0" max="100" step="5" data-f="actual" data-mid="${m.id}" value="${k.actual==null?'':k.actual}" placeholder="${s.donePct}"/></span>
@@ -774,52 +864,333 @@ function allCols(){
     return c;
   });
 }
-const PX = { day:38, week:11, month:4.4 };
-const pxPerDay = () => PX[ui.zoom];
+/* §1.8 continuous zoom. pxPerDay() is the SINGLE source of the day width (ui.ppd, clamped). tickMode()
+   picks the axis/grid granularity from PPD so the axis stays legible across the whole range (the presets
+   land on their old modes: 34→day, 11→week, 4.4→month). */
+const pxPerDay = () => clampPpd(ui.ppd);
+function tickMode(){ const p=pxPerDay(); return p>=18 ? "day" : (p>=6.2 ? "week" : "month"); }
+/* §1.9 bar-label font curve: clamp(6.4, 6.2 + PPD×0.55, 11.5)px; the label is HIDDEN (status-dot only)
+   when its computed size < 7.5px OR the bar is narrower than 34px. */
+function barLabelPx(ppd){ ppd=(ppd==null?pxPerDay():ppd); return Math.max(6.4, Math.min(11.5, 6.2 + ppd*0.55)); }
+function labelHidden(ppd, barW){ return barLabelPx(ppd) < 7.5 || barW < 34; }
+/* §1.8 readout: months in view = viewportWidth / (PPD × 30.4). */
+function monthsInView(){ const R=el("rightScroll"); const cw=R?R.clientWidth:0; return cw>0 ? cw/(pxPerDay()*30.4) : 0; }
+function fitPpd(){ const R=el("rightScroll"); const cw=R?R.clientWidth:0; return cw>0 ? cw/(9*30.4) : PRESET_PPD.month; } // reset = fit ≈ 9 months
+/* Refresh the zoom readout (Thai-first "N.N เดือน") + the preset buttons' active state for the current PPD. */
+function syncZoomUI(){
+  const ro=el("zoomReadout"); if(ro){ const m=monthsInView(); ro.textContent = m>0 ? (Math.round(m*10)/10).toFixed(1)+" เดือน" : "— เดือน"; }
+  const ppd=pxPerDay();
+  document.querySelectorAll('[data-zoom]').forEach(b=>{ const pv=PRESET_PPD[b.dataset.zoom]; b.classList.toggle('on', pv!=null && Math.abs(clampPpd(pv)-ppd)<1e-6); });
+}
+/* Centre-preserving zoom (§1.8): the date at the horizontal centre of #rightScroll stays centred after the
+   re-render — newScrollLeft = centreDay×newPPD − clientWidth/2 (clamped ≥0). Used by −/+, the presets and
+   reset. renderTimeline rebuilds bars, so label transforms start clean (R10); we re-apply them post-scroll. */
+function applyZoom(targetPpd){
+  if(_dragging) return;                                // H3a: a zoom re-render mid bar-drag would rebuild #rowsLayer and detach the dragged .bar → ignore zoom while a drag/resize is live
+  const R=el("rightScroll"), oldPpd=pxPerDay(); let centreDay=null, cw=0;
+  if(R){ cw=R.clientWidth; centreDay=(R.scrollLeft+cw/2)/oldPpd; }
+  ui.ppd=clampPpd(targetPpd); saveUi();
+  renderTimeline();                                    // rebuilds axis/grid/bars at the new PPD (and calls syncZoomUI)
+  if(R && centreDay!=null){ R.scrollLeft=Math.max(0, centreDay*pxPerDay() - cw/2); updateStickyLabels(); } // re-centre, then re-apply post-shift sticky labels
+}
 function getRange(){
   let mn=null,mx=null;
-  proj().modules.forEach(m=>m.features.forEach(f=>{ const s=parse(f.start),e=parse(f.end); if(!mn||s<mn)mn=s; if(!mx||e>mx)mx=e; }));
+  walkFeatures(proj(), f=>{ const s=parse(f.start),e=parse(f.end); if(!mn||s<mn)mn=s; if(!mx||e>mx)mx=e; }); // recursive over the whole tree
   if(!mn){ const t=today(); return {start:startOfMonth(addDays(t,-15)), end:endOfMonth(addDays(t,45))}; }
   return { start:startOfMonth(addDays(mn,-3)), end:endOfMonth(addDays(mx,3)) };
 }
 function updateMeta(){
-  const P=proj(); if(!P) return; const nMod=P.modules.length, nFeat=P.modules.reduce((a,m)=>a+m.features.length,0), r=getRange();
+  const P=proj(); if(!P) return; let nFeat=0; walkFeatures(P, ()=>nFeat++); const nMod=P.modules.length, r=getRange(); // nMod = top-level containers; nFeat = every descendant feature
   const ml=el("metaLine"); if(ml) ml.textContent=`${esc(P.client||"")} · ${nMod} โมดูล · ${nFeat} ฟีเจอร์ · ${monName(r.start.getMonth())} ${dispYear(r.start)} – ${monName(r.end.getMonth())} ${dispYear(r.end)}`;
 }
 
-/* =====================  MODULE HIERARCHY (parentId model)  =====================
-   Additive, backward-compatible: module.parentId (string|null|undefined). Falsy ⇒
-   MAIN module; set ⇒ SUB-module of that main. Exactly one level deep (a sub can
-   never be a parent). normalizeModules() runs at the top of renderBoard()/render-
-   Dashboard() and after every module mutation, so `mi` array indices stay valid for
-   BOTH panes (they render from this same normalized array). */
-function normalizeModules(P){
-  if(!P || !Array.isArray(P.modules)) return P;
-  const mods=P.modules, ids=new Set(mods.map(m=>m.id));
-  const hadParent=new Set(mods.filter(m=>m.parentId!=null).map(m=>m.id)); // input snapshot: who is a sub
-  // (1) sanitize: parentId pointing to a missing id, to itself, or to a module that is itself a sub → promote to main
-  mods.forEach(m=>{ const pid=m.parentId; if(pid==null) return; if(!ids.has(pid)||pid===m.id||hadParent.has(pid)) m.parentId=null; });
-  // (2) stable block reorder: every main immediately followed by its own subs (mains keep order; subs keep order within a parent)
-  const out=[], used=new Set();
-  mods.forEach(m=>{ if(m.parentId!=null||used.has(m.id)) return; out.push(m); used.add(m.id);
-    mods.forEach(s=>{ if(s.parentId===m.id && !used.has(s.id)){ out.push(s); used.add(s.id); } }); });
-  mods.forEach(m=>{ if(!used.has(m.id)){ m.parentId=null; out.push(m); used.add(m.id); } }); // safety: strays become mains
-  P.modules=out; return P;
+/* =====================  RECURSIVE NODE TREE (v1.0.4)  =====================
+   The v1.0.3 flat `P.modules[] + parentId + features[]` model is replaced by ONE
+   recursive tree. Every node is a container or a feature:
+     container := { id, kind:'container', name, description, color, collapsed, children:[node], ...unknown }
+     feature   := { id, kind:'feature', name, description, fid, start, end, status, remark, custom:{}, ...unknown }
+   `P.modules` holds root CONTAINERS only. `P.docVer===2` is stamped by migration.
+   Every mutation flows through apply() (R2); rows/bars are addressed by data-nid (R1);
+   both panes render from a single flatten(P) (R9). */
+
+/* ---- MIGRATION (R-spec §2): v1 flat modules → recursive tree. Idempotent, one place. ---- */
+function migrateDB(DB){ if(DB && Array.isArray(DB.projects)) DB.projects.forEach(migrateDoc); return DB; }
+function v1FeatureToNode(f){
+  // Keep the existing (uid-minted) unique feature id as the node id; keep ALL unknown fields.
+  const n = Object.assign({}, f);
+  delete n.children;                                  // a v1 feature never has children
+  n.kind = "feature";
+  if(!n.id || typeof n.id!=="string") n.id = nid();   // mint only if missing (D5: features carry uid()-scheme nids)
+  if(!n.custom || typeof n.custom!=="object") n.custom = {};
+  return n;
 }
-/* index of the MAIN a module (main or sub) belongs to */
-function mainIndexOf(mods, idx){ const m=mods[idx]; if(!m||m.parentId==null) return idx; const pi=mods.findIndex(x=>x.id===m.parentId); return pi>=0?pi:idx; }
-/* [start,end) of the contiguous block = a MAIN plus its immediate subs (assumes normalized order) */
-function blockRange(mods, mainIdx){ const id=mods[mainIdx].id; let end=mainIdx+1; while(end<mods.length && mods[end].parentId===id) end++; return [mainIdx,end]; }
-/* order+parent signature — detects drop-in-place (no-op) module moves */
-function moduleOrderSig(mods){ return mods.map(m=>m.id+"~"+(m.parentId==null?"":m.parentId)).join("|"); }
+function v1ModuleToContainer(m, childrenNodes){
+  const n = Object.assign({}, m);
+  delete n.features; delete n.parentId;               // features → children; parentId is dissolved into the tree
+  n.kind = "container";
+  n.collapsed = !!m.collapsed;
+  n.children = childrenNodes;
+  if(!n.id || typeof n.id!=="string") n.id = nid();   // D5: containers keep their existing v1.0.3 module id (progressOrder stays valid)
+  return n;
+}
+function migrateDoc(P){
+  if(!P || typeof P!=="object") return P;
+  const mods = Array.isArray(P.modules)?P.modules:[];
+  // Already v2 (stamped) OR already tree-shaped (kind/children present, e.g. a new project or a
+  // stamp-less re-adopt): sanitize only. Re-running the v1 path here would drop `children`.
+  if(P.docVer>=2 || mods.some(m=> m && (m.kind==="container" || m.kind==="feature" || Array.isArray(m.children)))){
+    P.docVer=2; normalizeTree(P); return P;
+  }
+  // Sanitize parentId exactly like v1.0.3 normalizeModules step 1 (missing / self / sub-of-sub ⇒ treated as main).
+  const ids=new Set(mods.map(m=>m&&m.id)), hadParent=new Set(mods.filter(m=>m&&m.parentId!=null).map(m=>m.id));
+  const parentOf = m => { const pid=m.parentId; if(pid==null) return null; if(!ids.has(pid)||pid===m.id||hadParent.has(pid)) return null; return pid; };
+  const roots=[];
+  // Root modules keep display order; each root's features become feature children first, then
+  // its parentId-children become container children (after the parent's own features).
+  mods.forEach(m=>{ if(m && parentOf(m)===null) roots.push(m); });
+  const out = roots.map(root=>{
+    const featChildren = (Array.isArray(root.features)?root.features:[]).map(v1FeatureToNode);
+    const subChildren = mods.filter(s=> s && parentOf(s)===root.id)
+      .map(sub=> v1ModuleToContainer(sub, (Array.isArray(sub.features)?sub.features:[]).map(v1FeatureToNode)));
+    return v1ModuleToContainer(root, featChildren.concat(subChildren));
+  });
+  P.modules = out;
+  P.docVer = 2;                                         // stamp
+  normalizeTree(P);                                     // enforce invariants (unique ids etc.)
+  return P;
+}
+
+/* ---- NORMALIZE (R4): unique ids, kind sanity, root=containers, order-preserving single pass. ---- */
+function normalizeTree(P){
+  if(!P || typeof P!=="object") return P;
+  if(!Array.isArray(P.modules)) P.modules=[];
+  const seen=new Set();
+  function fix(node){
+    if(!node || typeof node!=="object") return;
+    if(!node.id || typeof node.id!=="string" || seen.has(node.id)) node.id=nid();  // dupes / missing → re-id
+    seen.add(node.id);
+    if(node.kind!=="feature" && node.kind!=="container"){
+      // F1: infer kind for a node lacking a valid one, in priority order (§2 transition compatibility):
+      //   1) children[] present     → container (mirror nodes carry BOTH children+features — children WIN; the features mirror is never authority)
+      //   2) else features[] present → v1-shape module injected by a still-open old tab: LIFT features[] → children (order preserved), consume the array
+      //   3) else                   → leaf feature (as before)
+      if(Array.isArray(node.children)) node.kind="container";
+      else if(Array.isArray(node.features)){ node.kind="container"; node.children=node.features.map(v1FeatureToNode); delete node.features; } // consume features ONLY on this lift path
+      else node.kind="feature";
+    }
+    if(node.kind==="feature"){
+      if(Array.isArray(node.children) && node.children.length){                     // feature with children ⇒ becomes a container
+        console.warn('normalizeTree: feature "'+(node.name||node.id)+'" had children — converting to container');
+        node.kind="container";
+      } else { if("children" in node) delete node.children; if(!node.custom||typeof node.custom!=="object") node.custom={}; }
+    }
+    if(node.kind==="container"){
+      if(!Array.isArray(node.children)) node.children=[];
+      node.collapsed=!!node.collapsed;
+      node.children.forEach(fix);
+    }
+  }
+  P.modules.forEach(fix);
+  // F1: ROOT re-homing — a root node still carrying parentId whose target resolves to an existing
+  // container ELSEWHERE in the tree is moved INTO that container's children (append) + parentId deleted;
+  // any remaining parentId anywhere is deleted (the field is dissolved in v2). Order-preserving, idempotent.
+  const contById=new Map(); walkTree(P.modules, n=>{ if(n && n.kind==="container") contById.set(n.id, n); });
+  const rootsAfter=[];
+  P.modules.forEach(node=>{
+    const pid=node.parentId;
+    if(pid!=null && pid!==node.id){
+      const tgt=contById.get(pid);
+      if(tgt && tgt!==node && !subtreeHas(node, tgt)){ delete node.parentId; tgt.children.push(node); return; } // re-homed → drops out of the root list (no cycle: tgt is not within node's own subtree)
+    }
+    if("parentId" in node) delete node.parentId;                              // root node with an unresolvable parentId → strip
+    rootsAfter.push(node);
+  });
+  P.modules=rootsAfter;
+  walkTree(P.modules, n=>{ if(n && "parentId" in n) delete n.parentId; });    // dissolve parentId anywhere else in the tree
+  // Root holds containers ONLY: a stray root feature is wrapped into a recovery container (never dropped).
+  const finalRoots=[]; let recovery=null;
+  P.modules.forEach(node=>{
+    if(node.kind==="container"){ finalRoots.push(node); }
+    else {
+      if(!recovery){ recovery={id:nid(),kind:"container",name:"(กู้คืน)",description:"",color:0,collapsed:false,children:[]}; seen.add(recovery.id); finalRoots.push(recovery); }
+      recovery.children.push(node);
+    }
+  });
+  P.modules=finalRoots;
+  return P;
+}
+
+/* ---- DUAL-WRITE MIRROR (spec §2.2 — REMOVE IN v1.0.5) --------------------------------
+   On save, every container also writes `features:[its DIRECT feature children]`. It is a
+   MIRROR only — ignored on load when docVer>=2 (we render from children). It lets a still-
+   open v1.0.3 tab that adopts a v2 doc render top-level modules + their direct features
+   instead of a blank board, while its own saves keep `children` intact (v1.0.3 preserves
+   unknown fields). Delete this whole helper + its Store.save()/adoptRemote() calls in v1.0.5. */
+function writeMirror(DB){
+  if(!DB || !Array.isArray(DB.projects)) return;
+  DB.projects.forEach(P=>{
+    if(!P || !Array.isArray(P.modules)) return;
+    (function rec(nodes){ nodes.forEach(n=>{ if(n && n.kind==="container"){ n.features=(n.children||[]).filter(c=>c && c.kind==="feature"); rec(n.children||[]); } }); })(P.modules);
+  });
+}
+
+/* ---- TREE WALK / ADDRESSING (R1) ---- */
+function walkTree(nodes, fn, parent){ (nodes||[]).forEach((n,i)=>{ fn(n,parent||null,i); if(n && n.kind==="container") walkTree(n.children||[], fn, n); }); }
+function subtreeHas(root, cand){ let f=false; walkTree([root], n=>{ if(n===cand) f=true; }); return f; } // true when cand is root itself or a descendant of root (cycle guard for re-homing)
+function findNode(P, id){ if(!P||id==null) return null; let hit=null; walkTree(P.modules, n=>{ if(n && n.id===id) hit=n; }); return hit; }
+function findParent(P, id){ if(!P||id==null) return null; let par=null, found=false; walkTree(P.modules, (n,parent)=>{ if(n && n.id===id){ par=parent; found=true; } }); return found?par:null; } // null parent ⇒ node is a root
+function siblingsOf(P, id){ const par=findParent(P,id); return par ? par.children : P.modules; }
+function walkFeatures(P, fn){ if(!P) return; (function rec(nodes){ (nodes||[]).forEach(n=>{ if(!n) return; if(n.kind==="feature") fn(n); else if(n.kind==="container") rec(n.children||[]); }); })(P.modules||[]); }
+function containerFeatures(node){ const out=[]; if(!node) return out; (function rec(n){ (n.children||[]).forEach(c=>{ if(!c) return; if(c.kind==="feature") out.push(c); else if(c.kind==="container") rec(c); }); })(node); return out; } // every DESCENDANT feature
+function directFeatures(node){ return node && Array.isArray(node.children) ? node.children.filter(c=>c && c.kind==="feature") : []; }
+function countAll(node){ let n=0; if(node && node.kind==="container") walkTree(node.children||[], ()=>{ n++; }); return n; } // descendant node count (containers + features), for the cascade-delete confirm
+function removeNode(P, id){ const par=siblingsOf(P,id); const i=par.findIndex(n=>n && n.id===id); if(i>=0){ const [g]=par.splice(i,1); return g; } return null; }
+function revealInto(container){ if(container && container.kind==="container") container.collapsed=false; } // R6: inserting INTO a container auto-expands it
+function prevSibling(P, id){ const sibs=siblingsOf(P,id); const i=sibs.findIndex(n=>n&&n.id===id); return i>0?sibs[i-1]:null; }
+function nodeDepth(P, id){ let d=0, cur=findParent(P,id); while(cur){ d++; cur=findParent(P,cur.id); } return d; }
+
+/* ---- SHARED PREDICATES (R5): ONE source of truth for BOTH the grip-menu disabled-states
+   AND the hard guards inside every mutator. The menu only REFLECTS; the mutators re-check. ---- */
+function canIndent(P, id){ const p=prevSibling(P,id); return !!(p && p.kind==="container"); }          // needs a previous SIBLING that is a container
+function canOutdent(P, id){                                                                            // needs a parent, and NOT a feature at depth 1 (root holds containers only)
+  const par=findParent(P,id); if(!par) return false;                                                   // already at root
+  const node=findNode(P,id);
+  if(node && node.kind==="feature" && !findParent(P,par.id)) return false;                             // depth-1 feature → outdent would land at root (illegal)
+  return true;
+}
+function canDemote(P, id){ const n=findNode(P,id); return !!(n && n.kind==="container" && (!n.children || n.children.length===0) && findParent(P,id)!==null); } // G1: childless container AND non-root (root holds containers only — a root demote would be re-wrapped into a "(กู้คืน)" recovery container)
+function canPromote(P, id){ const n=findNode(P,id); return !!(n && n.kind==="feature"); }              // any feature
+function canAddChild(P, id){ const n=findNode(P,id); return !!(n && n.kind==="container"); }           // containers only
+
+/* ---- SINGLE MUTATION GATE (R2) ----
+   mutator(P) → normalizeTree(P) → Store.save() → renderBoard(). Returns the mutator's
+   focus/flash descriptor (a nid) if it provides one. EVERY tree create/move/edit/delete
+   goes through here — no direct Store.save() in ported tree paths. */
+function apply(mutator, opts){
+  const P=proj(); if(!P) return null;
+  const r = mutator ? mutator(P) : null;
+  normalizeTree(P);
+  Store.save();
+  if(opts && opts.fields && el("leftBody") && el("rowsLayer")){ // F2: non-structural FIELD edit → LIGHT render. Keep #leftBody (the focused editor + its listeners survive); refresh chart + meta + progress only.
+    renderTimeline();                                  // recomputes flatten; runs applyWrap()/syncRowHeights() (reads the live grid) + updateStickyLabels()
+    updateMeta();
+    if(el("progressPanel")) renderProgress();
+  } else {
+    renderBoard();                                     // structural mutation (create/move/delete/promote/…) → full rebuild
+  }
+  if(r && r.focus) focusNode(r.focus);                 // focus a freshly-created feature's name cell
+  if(r && r.flash) flashNode(r.flash);                 // R6: reveal-and-flash the moved/created row in BOTH panes
+  return r || null;
+}
+function focusNode(id){
+  const row = el("leftBody") && el("leftBody").querySelector('.featRow[data-nid="'+cssEsc(id)+'"]');
+  if(row){ const tx=row.querySelector('.cell.feat .txt'); if(tx){ tx.focus(); if(window.getSelection){ const s=window.getSelection(); const rg=document.createRange(); rg.selectNodeContents(tx); rg.collapse(false); s.removeAllRanges(); s.addRange(rg); } } }
+}
+function cssEsc(s){ return String(s).replace(/["\\]/g,"\\$&"); }
+/* R6 reveal-and-flash: after a structural render, pulse a transient violet highlight on the
+   moved/created row in the LEFT pane AND its chart row (addressed by data-nid); removed on animationend. */
+function flashNode(id){
+  if(id==null) return; const sel='[data-nid="'+cssEsc(id)+'"]';
+  const lb=el("leftBody"), rl=el("rowsLayer");
+  const targets=[
+    lb && lb.querySelector('.modRow'+sel), lb && lb.querySelector('.featRow'+sel),
+    rl && rl.querySelector('.modBarRow'+sel), rl && rl.querySelector('.bar'+sel),
+  ];
+  targets.forEach(elm=>{ if(!elm) return; elm.classList.remove('flashRow'); void elm.offsetWidth; elm.classList.add('flashRow');
+    elm.addEventListener('animationend', ()=>elm.classList.remove('flashRow'), {once:true}); });
+}
+
+/* ---- FLATTEN (R9): ONE visible-row list feeds BOTH panes. Row kinds:
+   'container' (46px modRow/modBarRow) · 'feature' (42px featRow/barRow) · 'add' (32px addFeat/spacer).
+   depth = tree depth (root containers 0). lastChild = node is the last child of a non-root parent. ---- */
+function flatten(P){
+  const rows=[];
+  (function rec(nodes, depth, parent){
+    (nodes||[]).forEach((n,idx)=>{
+      if(!n) return;
+      const lastChild = !!parent && idx===nodes.length-1;
+      if(n.kind==="feature"){ rows.push({type:"feature", node:n, depth, parent, lastChild}); }
+      else {
+        rows.push({type:"container", node:n, depth, parent, lastChild});
+        if(!n.collapsed){ rec(n.children||[], depth+1, n); rows.push({type:"add", node:n, depth, parent, lastChild}); }
+      }
+    });
+  })(P.modules||[], 0, null);
+  return rows;
+}
 
 /* =====================  RENDER BOARD  ===================== */
 function renderBoard(){
-  const P=proj(); if(P) normalizeModules(P); renderGrid(); renderTimeline(); updateMeta(); if(el("progressPanel")) renderProgress();
+  const P=proj(); if(!P) return;
+  normalizeTree(P);
+  if(!el("leftBody")){ if(el("progressPanel")) renderProgress(); updateMeta(); return; } // not on the timeline tab → refresh panels only
+  const rows=flatten(P);                                // R9: compute the visible-row list ONCE, feed BOTH panes
+  renderGrid(rows); renderTimeline(rows); updateMeta();
+  if(el("progressPanel")) renderProgress();
 }
 
-function renderGrid(){
+/* ---- GRIP MENU (spec §1.1, D7): the slide-open pill REPLACES the v1.0.3 hover clusters
+   (.modActs / .rowActs). It opens on GRIP hover / focus-within only (never plain row hover),
+   slides open to the right, and its buttons only REFLECT the shared predicates (R5) — the
+   mutators re-decide. The grip keeps its drag data-act (moddrag/rowdrag) + _DRAG_SEL class. ---- */
+/* G6a/§1.9 stepped shading: set INLINE per row (no lvl1..6 class clamp — the spec formula is unbounded).
+   §1.10 theme channel: emit BOTH the light and dark shade inline; styles.css resolves --shade:var(--shade-l)
+   by default and --shade:var(--shade-d) under [data-theme="dark"], so pane-parity holds in BOTH themes
+   with NO re-render on switch. Light = rgba(146,65,255, .03×depth) · Dark = rgba(169,112,255, .055×depth).
+   depth 0 ⇒ no tint (falls back to the CSS default --shade-l/-d: transparent). */
+function shadeVar(v){
+  const d=Math.max(0, v|0); if(d<=0) return "";
+  const la=3*d, da=55*d;                                                           // light .03×depth · dark .055×depth (thousandths for the dark channel avoid float drift)
+  const lv=la>=100 ? "1" : "."+String(la).padStart(2,"0");
+  const dv=da>=1000 ? "1" : "."+String(da).padStart(3,"0");
+  return "--shade-l:rgba(146,65,255,"+lv+");--shade-d:rgba(169,112,255,"+dv+");";
+}
+function gmBtn(act, icon, title, o){ o=o||{}; return `<button type="button" class="gm${o.danger?" danger":""}" data-act="${act}" title="${esc(title)}"${o.disabled?" disabled":""}>${icon}</button>`; }
+function gripMenu(P, node, depth){
+  const id=node.id, ind=canIndent(P,id), outd=canOutdent(P,id);
+  if(node.kind==="container"){
+    const editT = depth===0 ? "แก้ไขโมดูล" : "แก้ไขโมดูลย่อย";                                          // depth naming (§1.2)
+    return `<div class="gripMenu">`
+      + `<span class="modGrip" data-act="moddrag" title="ลากเพื่อย้ายโมดูล">${IC.grip}</span>`
+      + `<div class="gripPill" role="toolbar">`
+        + gmBtn("modup",  IC.up,      "เลื่อนโมดูลขึ้น")
+        + gmBtn("moddown",IC.down,    "เลื่อนโมดูลลง")
+        + `<span class="gsep"></span>`
+        + gmBtn("outdent",IC.outdent, "เลื่อนออก (Outdent)", {disabled:!outd})
+        + gmBtn("indent", IC.indent,  "เลื่อนเข้า (Indent)",  {disabled:!ind})
+        + `<span class="gsep"></span>`
+        + gmBtn("addfeat",IC.plus,    "เพิ่มฟีเจอร์")
+        + gmBtn("promote",IC.promote, "เปลี่ยนเป็นฟีเจอร์ (Demote)", {disabled:!canDemote(P,id)})
+        + gmBtn("editmod",IC.edit,    editT)
+        + gmBtn("delmod", IC.trash,   "ลบโมดูล", {danger:true})
+      + `</div></div>`;
+  }
+  return `<div class="gripMenu">`
+    + `<span class="grip" data-act="rowdrag" title="ลากเพื่อย้ายแถว">${IC.grip}</span>`
+    + `<div class="gripPill" role="toolbar">`
+      + gmBtn("up",     IC.up,      "เลื่อนขึ้น")
+      + gmBtn("down",   IC.down,    "เลื่อนลง")
+      + `<span class="gsep"></span>`
+      + gmBtn("outdent",IC.outdent, "เลื่อนออก (Outdent)", {disabled:!outd})
+      + gmBtn("indent", IC.indent,  "เลื่อนเข้า (Indent)",  {disabled:!ind})
+      + `<span class="gsep"></span>`
+      + gmBtn("promote",IC.promote, "เปลี่ยนเป็นโมดูล (Promote)")
+      + gmBtn("editfeat",IC.edit,   "แก้ไขฟีเจอร์")
+      + gmBtn("delfeat",IC.trash,   "ลบฟีเจอร์", {danger:true})
+    + `</div></div>`;
+}
+/* Measure each rendered pill's real width → per-row --railW (the exact distance the row content
+   slides right so the open menu never overlays it). Batched reads then writes to avoid layout thrash. */
+function sizeGripRails(){
+  const lb=el("leftBody"); if(!lb) return;
+  const pills=[...lb.querySelectorAll('.gripPill')];
+  const ws=pills.map(p=>p.offsetWidth);
+  pills.forEach((p,i)=>{ const row=p.closest('.modRow,.featRow'); if(row) row.style.setProperty('--railW', ws[i]+'px'); });
+}
+
+function renderGrid(rows){
   const P=proj(), cols=allCols();
+  rows = rows || flatten(P);
   el("leftHead").innerHTML = cols.map(c=>{
     const wrapBtn = c.key==="description" ? `<button class="colTool wrapToggle ${ui.wrapTxt?'on':''}" data-act="wraptoggle" data-tip="ตัดข้อความ (Wrap) — คลิกเพื่อสลับ">${IC.wrap}</button>` : "";
     const delBtn = c.del ? `<button class="delcol" data-act="delcol" data-col="${c.custom}" title="ลบคอลัมน์">${IC.x}</button>` : "";
@@ -827,56 +1198,59 @@ function renderGrid(){
   }).join("");
   const gw = cols.reduce((a,c)=>a+c.w,0);
   let html="";
-  P.modules.forEach((m,mi)=>{
-    const p=PALETTE[m.color%PALETTE.length];
-    const isSub=m.parentId!=null, nxt=P.modules[mi+1];
-    const lastSub=isSub && (!nxt || nxt.parentId!==m.parentId);   // last sub of its parent → its block holds the rail terminus (subEnd)
-    const modCls="modRow"+(m.collapsed?" collapsed":"")+(isSub?" subMod":"")+((lastSub&&m.collapsed)?" subEnd":""); // collapsed last sub → modRow itself is the terminus
-    html += `<div class="${modCls}" style="width:${gw}px" data-mi="${mi}">
-      <span class="modGrip" data-act="moddrag" title="ลากเพื่อย้ายโมดูล">${IC.grip}</span>
-      <span class="caret" data-act="toggle">${IC.caret}</span>
-      <span class="chip" style="background:${p.chip}"></span>
-      <span class="modText"><span class="modName" contenteditable="true" data-field="modname" spellcheck="false">${esc(m.name)}</span>${m.description?`<span class="modDesc" data-tip="${esc(m.description)}">${esc(m.description)}</span>`:""}</span>
-      <span class="count">${m.features.length}</span>
-      <span class="modActs">
-        <button class="iconbtn" data-act="modup" title="เลื่อนโมดูลขึ้น">${IC.up}</button>
-        <button class="iconbtn" data-act="moddown" title="เลื่อนโมดูลลง">${IC.down}</button>
-        <button class="iconbtn" data-act="editmod" title="แก้ไขโมดูล">${IC.edit}</button>
-        <button class="iconbtn" data-act="addfeat" title="เพิ่มฟีเจอร์">${IC.plus}</button>
-        <button class="iconbtn danger" data-act="delmod" title="ลบโมดูล">${IC.trash}</button>
-      </span></div>`;
-    if(!m.collapsed){
-      m.features.forEach((f,fi)=>{
-        html += `<div class="featRow${isSub?' subScope':''}" data-mi="${mi}" data-fi="${fi}">`;
-        cols.forEach(c=>{
-          if(c.kind==="feat"){
-            html += `<div class="cell feat" style="width:${c.w}px">
-              <span class="grip" data-act="rowdrag" title="ลากเพื่อย้ายแถว">${IC.grip}</span>
-              <span class="txt" contenteditable="true" data-field="name" spellcheck="false" data-ph="ตั้งชื่อฟีเจอร์…">${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}${esc(f.name)}</span>
-              <span class="rowActs"><button class="iconbtn" data-act="up" title="เลื่อนขึ้น">${IC.up}</button><button class="iconbtn" data-act="down" title="เลื่อนลง">${IC.down}</button><button class="iconbtn danger" data-act="delfeat" title="ลบฟีเจอร์">${IC.trash}</button></span></div>`;
-          } else if(c.kind==="date"){
-            const dval=c.custom?(f.custom[c.custom]||""):(f[c.key]||"");
-            html += `<div class="cell" style="width:${c.w}px"><input type="date" value="${esc(dval)}" data-mi="${mi}" data-fi="${fi}" data-field="${c.key}" /></div>`;
-          } else if(c.kind==="status"){
-            const st=stById(f.status);
-            const opts=STATUS.map(s=>`<option value="${s.id}" ${s.id===f.status?'selected':''}>${s.th}</option>`).join("");
-            html += `<div class="cell" style="width:${c.w}px"><select class="statusSel" data-mi="${mi}" data-fi="${fi}" data-field="status" style="box-shadow:inset 4px 0 0 ${st.color}">${opts}</select></div>`;
-          } else {
-            const val=c.custom?(f.custom[c.custom]||""):(f[c.key]||"");
-            html += `<div class="cell" style="width:${c.w}px"><span class="txt" contenteditable="true" data-field="${c.key}" spellcheck="false" data-ph="${esc(c.ph||"…")}">${esc(val)}</span></div>`;
-          }
-        });
-        html += `</div>`;
+  rows.forEach(row=>{
+    const n=row.node, depth=row.depth;
+    if(row.type==="container"){
+      const p=PALETTE[(n.color||0)%PALETTE.length];
+      const isSub=depth>=1;                                             // any depth ≥1 is a "sub-module" visually
+      const subEndCls=(isSub && row.lastChild && n.collapsed)?" subEnd":""; // collapsed last child → its modRow is the rail terminus
+      const modCls="modRow"+(n.collapsed?" collapsed":"")+(isSub?" subMod":"")+subEndCls;
+      html += `<div class="${modCls}" style="width:${gw}px;--lvl:${depth};${shadeVar(depth)}" data-nid="${esc(n.id)}">
+      ${gripMenu(P, n, depth)}
+      <div class="modMain">
+        <span class="caret" data-act="toggle">${IC.caret}</span>
+        <span class="chip" style="background:${p.chip}"></span>
+        <span class="modText"><span class="modName" contenteditable="true" data-field="modname" spellcheck="false">${esc(n.name)}</span>${n.description?`<span class="modDesc" data-tip="${esc(n.description)}">${esc(n.description)}</span>`:""}</span>
+        <span class="count">${containerFeatures(n).length}</span>
+      </div></div>`;
+    } else if(row.type==="feature"){
+      const f=n, isSub=depth>=2;                                        // feature under a sub-container (depth ≥2) → subScope
+      // G2: featRow mirrors modRow — the grip menu is a DIRECT child at the row front (hover anchor +
+      // drag handle, never overlaid), and .rowMain (the WHOLE cell strip) slides right by the measured
+      // --railW when the menu opens. The pill occupies the vacated space to the left; nothing overlaps.
+      html += `<div class="featRow${isSub?' subScope':''}" style="--lvl:${depth};${shadeVar(depth)}" data-nid="${esc(f.id)}">`;
+      html += gripMenu(P, f, depth);
+      html += `<div class="rowMain">`;
+      cols.forEach(c=>{
+        if(c.kind==="feat"){
+          html += `<div class="cell feat" style="width:${c.w}px"><span class="txt" contenteditable="true" data-field="name" spellcheck="false" data-ph="ตั้งชื่อฟีเจอร์…">${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}${esc(f.name)}</span></div>`;
+        } else if(c.kind==="date"){
+          const dval=c.custom?((f.custom&&f.custom[c.custom])||""):(f[c.key]||"");
+          html += `<div class="cell" style="width:${c.w}px"><input type="date" value="${esc(dval)}" data-nid="${esc(f.id)}" data-field="${c.key}" /></div>`;
+        } else if(c.kind==="status"){
+          const st=stById(f.status);
+          const opts=STATUS.map(s=>`<option value="${s.id}" ${s.id===f.status?'selected':''}>${s.th}</option>`).join("");
+          html += `<div class="cell" style="width:${c.w}px"><select class="statusSel" data-nid="${esc(f.id)}" data-field="status" style="box-shadow:inset 4px 0 0 ${st.color}">${opts}</select></div>`;
+        } else {
+          const val=c.custom?((f.custom&&f.custom[c.custom])||""):(f[c.key]||"");
+          html += `<div class="cell" style="width:${c.w}px"><span class="txt" contenteditable="true" data-field="${c.key}" spellcheck="false" data-ph="${esc(c.ph||"…")}">${esc(val)}</span></div>`;
+        }
       });
-      html += `<div class="addFeat${isSub?' subScope':''}${lastSub?' subEnd':''}" data-mi="${mi}" data-act="addfeat">${IC.plus}<span>เพิ่มฟีเจอร์ในโมดูลนี้</span></div>`;
+      html += `</div></div>`;                                          // close .rowMain, then .featRow
+    } else { // add-feature zone for this container (one per non-collapsed container, at any depth)
+      const isSub=depth>=1, subEndCls=(isSub && row.lastChild)?" subEnd":"";
+      html += `<div class="addFeat${isSub?' subScope':''}${subEndCls}" style="--lvl:${depth+1};${shadeVar(depth+1)}" data-nid="${esc(n.id)}" data-act="addfeat">${IC.plus}<span>เพิ่มฟีเจอร์ในโมดูลนี้</span></div>`;
     }
   });
   el("leftBody").innerHTML = html;
   bindGrid();
+  sizeGripRails();                                     // measure each pill → per-row --railW (content-slide distance)
 }
 
-function renderTimeline(){
+function renderTimeline(rows){
   const P=proj(), r=getRange(), ppd=pxPerDay();
+  const dark=domThemeDark();                            // §1.10 item 6 / T1: read the DOM attribute (single authority) — NOT effectiveTheme(). So export/print force html[data-theme]=light + re-render → these inline fills capture as light pastels (no dark leak).
+  rows = rows || flatten(P);                            // R9: reuse renderBoard's flatten, or recompute for standalone calls
   const totalDays=daysBetween(r.start,r.end)+1, W=totalDays*ppd;
   let months="", cur=new Date(r.start);
   while(cur<=r.end){
@@ -885,45 +1259,53 @@ function renderTimeline(){
     months += `<div class="monthBand" style="width:${w}px">${monName(cur.getMonth())} ${showYear?dispYear(cur):"’"+String(dispYear(cur)).slice(-2)}</div>`;
     cur=startOfMonth(addDays(mEnd,1));
   }
+  const tm=tickMode();                                  // §1.8: axis/grid granularity derived from the continuous PPD (was ui.zoom)
   let ticks="";
-  if(ui.zoom==="day"){ for(let i=0;i<totalDays;i++){ const d=addDays(r.start,i),wd=d.getDay(); ticks+=`<div class="tick ${(wd===0||wd===6)?'wkend':''} ${d.getDate()===1?'mstart':''}" style="width:${ppd}px">${d.getDate()}</div>`; } }
-  else if(ui.zoom==="week"){ for(let i=0;i<totalDays;i+=7){ const d=addDays(r.start,i),w=Math.min(7,totalDays-i)*ppd; ticks+=`<div class="tick" style="width:${w}px">${d.getDate()}/${d.getMonth()+1}</div>`; } }
+  if(tm==="day"){ for(let i=0;i<totalDays;i++){ const d=addDays(r.start,i),wd=d.getDay(); ticks+=`<div class="tick ${(wd===0||wd===6)?'wkend':''} ${d.getDate()===1?'mstart':''}" style="width:${ppd}px">${d.getDate()}</div>`; } }
+  else if(tm==="week"){ for(let i=0;i<totalDays;i+=7){ const d=addDays(r.start,i),w=Math.min(7,totalDays-i)*ppd; ticks+=`<div class="tick" style="width:${w}px">${d.getDate()}/${d.getMonth()+1}</div>`; } }
   else { for(let i=0;i<totalDays;i+=7){ const w=Math.min(7,totalDays-i)*ppd; ticks+=`<div class="tick" style="width:${w}px"></div>`; } }
   el("axis").innerHTML=`<div id="axisMonths" style="width:${W}px">${months}</div><div id="axisTicks" style="width:${W}px">${ticks}</div>`;
 
   let grid="";
-  if(ui.zoom==="day"){
+  if(tm==="day"){
     for(let i=0;i<=totalDays;i++){ const d=addDays(r.start,i),x=i*ppd; grid+=`<div class="vline ${d.getDate()===1?'month':''}" style="left:${x}px"></div>`; if(i<totalDays){ const wd=d.getDay(); if(wd===0||wd===6) grid+=`<div class="wband" style="left:${x}px;width:${ppd}px"></div>`; } }
   } else {
-    for(let i=0;i<=totalDays;i++){ const d=addDays(r.start,i); if(d.getDate()===1||i===0||i===totalDays) grid+=`<div class="vline month" style="left:${i*ppd}px"></div>`; else if(ui.zoom==="week"&&daysBetween(r.start,d)%7===0) grid+=`<div class="vline" style="left:${i*ppd}px"></div>`; }
+    for(let i=0;i<=totalDays;i++){ const d=addDays(r.start,i); if(d.getDate()===1||i===0||i===totalDays) grid+=`<div class="vline month" style="left:${i*ppd}px"></div>`; else if(tm==="week"&&daysBetween(r.start,d)%7===0) grid+=`<div class="vline" style="left:${i*ppd}px"></div>`; }
   }
   const t=today();
   if(t>=r.start&&t<=r.end){ const x=daysBetween(r.start,t)*ppd+ppd/2; grid+=`<div id="todayLine" style="left:${x}px"></div><div id="todayFlag" style="left:${x}px">วันนี้ ${fmtThai(t)}</div>`; }
   el("gridLayer").style.width=W+"px"; el("gridLayer").innerHTML=grid;
 
-  let rows="", altCount=0;
-  P.modules.forEach((m,mi)=>{
-    const p=PALETTE[m.color%PALETTE.length];
-    let ms=null,me=null; m.features.forEach(f=>{ const s=parse(f.start),e=parse(f.end); if(!ms||s<ms)ms=s; if(!me||e>me)me=e; });
-    let modBar="";
-    if(ms){ const left=daysBetween(r.start,ms)*ppd, w=(daysBetween(ms,me)+1)*ppd; modBar=`<div class="modBar" style="left:${left}px;width:${w}px"><div class="cap l" style="background:${p.border}"></div><div class="span" style="background:${p.border}"></div><div class="cap r" style="background:${p.border}"></div></div>`; }
-    rows += `<div class="modBarRow" style="width:${W}px">${modBar}</div>`;
-    if(!m.collapsed){
-      m.features.forEach((f,fi)=>{
-        const left=daysBetween(r.start,f.start)*ppd, w=Math.max(ppd,(daysBetween(f.start,f.end)+1)*ppd);
-        const alt=(altCount++ %2)===1?"alt":""; const dur=daysBetween(f.start,f.end)+1; const st=stById(f.status);
-        const tip=`${f.fid?f.fid+" · ":""}${f.name}\n${fmtThai(parse(f.start))} → ${fmtThai(parse(f.end))} (${dur} วัน)\nสถานะ: ${st.th}${f.remark?"\nหมายเหตุ: "+f.remark:""}`;
-        rows += `<div class="barRow ${alt}" style="width:${W}px"><div class="bar" data-mi="${mi}" data-fi="${fi}" data-tip="${esc(tip)}" style="left:${left+1}px;width:${w-2}px;background:${p.fill};border-color:${p.border};color:${p.ink}"><div class="handle l" data-mode="l"></div><span class="sdot" style="background:${st.color}"></span><span class="blabel">${esc(f.name)}</span><div class="handle r" data-mode="r"></div></div></div>`;
-      });
-      rows += `<div class="barRow" style="width:${W}px;height:32px;border-bottom:1px solid var(--line)"></div>`;
+  let rowsHtml="", altCount=0;
+  rows.forEach(row=>{
+    const n=row.node, sh=shadeVar(row.depth);           // §1.6 right-pane shading: SAME shadeVar(depth) as the row's left twin (frame-sync made visible)
+    if(row.type==="container"){
+      const p=PALETTE[(n.color||0)%PALETTE.length];
+      let ms=null,me=null; containerFeatures(n).forEach(f=>{ const s=parse(f.start),e=parse(f.end); if(!ms||s<ms)ms=s; if(!me||e>me)me=e; }); // R7 / §5.3: span derives from ALL descendant features at any depth; empty container ⇒ no bar
+      let modBar="";
+      if(ms){ const left=daysBetween(r.start,ms)*ppd, w=(daysBetween(ms,me)+1)*ppd; modBar=`<div class="modBar" style="left:${left}px;width:${w}px"><div class="cap l" style="background:${p.border}"></div><div class="span" style="background:${p.border}"></div><div class="cap r" style="background:${p.border}"></div></div>`; }
+      rowsHtml += `<div class="modBarRow" style="width:${W}px;${sh}" data-nid="${esc(n.id)}">${modBar}</div>`;
+    } else if(row.type==="feature"){
+      const f=n, pc=PALETTE[((row.parent&&row.parent.color)||0)%PALETTE.length]; // bar colour = parent container's palette (as v1.0.3)
+      const barFill=dark?hex2rgba(pc.chip,.22):pc.fill, barInk=dark?lighten(pc.chip,.62):pc.ink; // §1.10 item 6: dark = chip@.22 fill + pale chip-tint ink; light = pastel pc.fill / dark pc.ink (byte-identical to v1.0.3)
+      const left=daysBetween(r.start,f.start)*ppd, w=Math.max(ppd,(daysBetween(f.start,f.end)+1)*ppd);
+      const alt=(altCount++ %2)===1?"alt":""; const dur=daysBetween(f.start,f.end)+1; const st=stById(f.status);
+      const tip=`${f.fid?f.fid+" · ":""}${f.name}\n${fmtThai(parse(f.start))} → ${fmtThai(parse(f.end))} (${dur} วัน)\nสถานะ: ${st.th}${f.remark?"\nหมายเหตุ: "+f.remark:""}`;
+      const fs=barLabelPx(ppd), hide=labelHidden(ppd, w);   // §1.9 label font curve + hide (status-dot only) at small size/width
+      const lblStyle=`font-size:${fs.toFixed(2)}px${hide?';display:none':''}`;
+      const bw=Math.max(2, w-2);                            // H1: at PPD<2 a short bar's (w-2) goes NEGATIVE → invalid CSS → the width declaration drops and the .bar auto-sizes to its content (handles+dot+label). Floor at 2px (keeps the −2 inset for normal widths). Dates stay safe: the drag commits day deltas (onBarMove reads drag.oS/oE, never bar.style.width). .bar has overflow:hidden so the dot/handles stay clipped inside the 2px box.
+      rowsHtml += `<div class="barRow ${alt}" style="width:${W}px;${sh}" data-nid="${esc(f.id)}"><div class="bar" data-nid="${esc(f.id)}" data-tip="${esc(tip)}" style="left:${left+1}px;width:${bw}px;background:${barFill};border-color:${pc.border};color:${barInk}"><div class="handle l" data-mode="l"></div><span class="sdot" style="background:${st.color}"></span><span class="blabel" style="${lblStyle}">${esc(f.name)}</span><div class="handle r" data-mode="r"></div></div></div>`;
+    } else { // add-zone → 32px spacer aligned with the left addFeat row (1:1 panes); shade uses depth+1 to match the left addFeat
+      rowsHtml += `<div class="barRow" style="width:${W}px;height:32px;border-bottom:1px solid var(--line);${shadeVar(row.depth+1)}" data-nid="${esc(n.id)}"></div>`;
     }
   });
-  el("rowsLayer").style.width=W+"px"; el("rowsLayer").innerHTML=rows;
+  el("rowsLayer").style.width=W+"px"; el("rowsLayer").innerHTML=rowsHtml;
   el("bars").style.width=W+"px";
   el("empty").style.display=P.modules.length?"none":"flex";
   bindBars();
   applyWrap();
   updateStickyLabels();                                 // apply the sliding-label shift for the current scroll (fresh bars start at transform:'')
+  syncZoomUI();                                         // refresh the months-in-view readout + preset active-state for the current PPD
 }
 
 /* ---- Wrap Txt: sync chart row heights with (possibly wrapped) left rows ---- */
@@ -936,7 +1318,7 @@ function syncRowHeights(){
   const rl=el("rowsLayer"), lb=el("leftBody"); if(!rl||!lb) return;
   const on = !!ui.wrapTxt;
   lb.querySelectorAll('.featRow').forEach(fr=>{
-    const bar = rl.querySelector(`.bar[data-mi="${fr.dataset.mi}"][data-fi="${fr.dataset.fi}"]`);
+    const bar = rl.querySelector('.bar[data-nid="'+cssEsc(fr.dataset.nid)+'"]');
     if(!bar) return;
     const barRow = bar.closest('.barRow'); if(!barRow) return;
     if(on){
@@ -979,6 +1361,7 @@ function isClipped(inner, container){
        intersection of the bar's box (overflow:hidden) and #rightScroll's viewport. */
 function labelNeedsTip(lbl){
   if(!lbl) return false;
+  if(lbl.style.display==='none') return true;                // §1.9: a zoom-hidden label (small size/width) always qualifies for the hover bubble
   if((lbl.scrollWidth - lbl.clientWidth) > 1) return true;   // truncated inside its own box (ellipsis)
   const bar=lbl.closest('.bar'), R=el('rightScroll');
   if(!bar || !R) return isClipped(lbl, el('rightScroll'));   // fallback: viewport-only clip
@@ -1001,6 +1384,7 @@ function updateStickyLabels(){
   const vpLeft=R.scrollLeft, vpRight=vpLeft+R.clientWidth, PAD=9;   // PAD matches .bar's left padding
   layer.querySelectorAll('.bar').forEach(bar=>{
     const lbl=bar.querySelector('.blabel'); if(!lbl) return;
+    if(lbl.style.display==='none'){ if(lbl.style.transform) lbl.style.transform=''; return; } // §1.9: hidden label → no sticky slide (skip while invisible)
     const barLeft=parseFloat(bar.style.left)||0;
     const barW=parseFloat(bar.style.width)||bar.offsetWidth;
     if(barLeft+barW < vpLeft || barLeft > vpRight){ if(lbl.style.transform) lbl.style.transform=''; return; } // fully off-viewport
@@ -1068,70 +1452,124 @@ function bindGrid(){
   lh.querySelectorAll('.wrapToggle').forEach(b=>{ b.addEventListener('pointerdown', e=>e.stopPropagation()); b.addEventListener('click', onWrapToggle); });
 }
 function onTextBlur(e){
-  const x=e.target, field=x.dataset.field, P=proj();
-  if(field==="modname"){ const mi=+x.closest('.modRow').dataset.mi; P.modules[mi].name=x.textContent.trim(); Store.save(); updateMeta(); return; }
+  const x=e.target, field=x.dataset.field;
+  if(field==="modname"){                                             // R1: resolve container via findNode(data-nid)
+    const id=x.closest('.modRow').dataset.nid, val=x.textContent.trim();
+    const n=findNode(proj(), id); if(!n || n.name===val) return;     // F2: dirty-check — unchanged ⇒ no save/render (DOM identity preserved)
+    apply(P=>{ const t=findNode(P,id); if(t) t.name=val; }, {fields:true}); // container name affects meta/progress/export only; grid cell already shows the text → light render
+    return;
+  }
   const row=x.closest('.featRow'); if(!row) return;
-  const f=P.modules[+row.dataset.mi].features[+row.dataset.fi];
-  let val=x.textContent;
-  if(field==="name"){ if(f.fid&&val.startsWith(f.fid)) val=val.slice(f.fid.length); f.name=val.trim(); const bl=el("rowsLayer").querySelector(`.bar[data-mi="${row.dataset.mi}"][data-fi="${row.dataset.fi}"] .blabel`); if(bl) bl.textContent=f.name; }
-  else if(field.startsWith("c:")){ f.custom[field.slice(2)]=val.trim(); }
-  else f[field]=val.trim();
-  Store.save();
+  const id=row.dataset.nid; const f0=findNode(proj(), id); if(!f0) return;
+  let val=x.textContent, key, newVal, curVal;
+  if(field==="name"){ if(f0.fid && val.startsWith(f0.fid)) val=val.slice(f0.fid.length); key="name"; newVal=val.trim(); curVal=f0.name||""; }
+  else if(field.startsWith("c:")){ key=field.slice(2); newVal=val.trim(); curVal=(f0.custom&&f0.custom[key])||""; }
+  else { key=field; newVal=val.trim(); curVal=f0[field]||""; }
+  if(newVal===(curVal||"")) return;                                  // F2: dirty-check — unchanged ⇒ no apply (no save, no render)
+  apply(P=>{ const f=findNode(P,id); if(!f) return;
+    if(field==="name") f.name=newVal;
+    else if(field.startsWith("c:")){ if(!f.custom) f.custom={}; f.custom[key]=newVal; }
+    else f[field]=newVal;
+  }, {fields:true});                                                 // FIELD edit: renderTimeline refreshes the .blabel; #leftBody untouched
 }
 function onDateChange(e){
-  const inp=e.target, P=proj(), f=P.modules[+inp.dataset.mi].features[+inp.dataset.fi], field=inp.dataset.field, v=inp.value;
-  if(field.startsWith("c:")){ const cid=field.slice(2); if(!v){ inp.value=f.custom[cid]||""; return; } f.custom[cid]=v; Store.save(); return; } // custom date column → store on f.custom, independent of the feature's schedule
-  if(!v){ inp.value=f[field]; return; }
-  if(field==="start"){ f.start=v; if(parse(f.end)<parse(v)) f.end=v; } else { f.end=v; if(parse(v)<parse(f.start)) f.start=v; }
-  Store.save(); renderTimeline();
+  const inp=e.target, id=inp.dataset.nid, field=inp.dataset.field, v=inp.value;
+  const f=findNode(proj(), id); if(!f) return;
+  if(field.startsWith("c:")){ const cid=field.slice(2); if(!v){ inp.value=(f.custom&&f.custom[cid])||""; return; } apply(P=>{ const t=findNode(P,id); if(t){ if(!t.custom) t.custom={}; t.custom[cid]=v; } }, {fields:true}); return; } // custom date column → store on f.custom, independent of the feature's schedule
+  if(!v){ inp.value=f[field]||""; return; }                            // empty ⇒ revert (no mutation)
+  apply(P=>{ const t=findNode(P,id); if(!t) return; if(field==="start"){ t.start=v; if(parse(t.end)<parse(v)) t.end=v; } else { t.end=v; if(parse(v)<parse(t.start)) t.start=v; } }, {fields:true});
+  // F2: the grid is NOT rebuilt on a field edit → manually reconcile the paired schedule input if the clamp moved it (v1.0.3 patch)
+  const f2=findNode(proj(), id), row=inp.closest('.featRow'); if(!f2 || !row) return;
+  const si=row.querySelector('input[data-field="start"]'), ei=row.querySelector('input[data-field="end"]');
+  if(si && si.value!==f2.start) si.value=f2.start; if(ei && ei.value!==f2.end) ei.value=f2.end;
 }
 function onStatusChange(e){
-  const s=e.target, P=proj(), f=P.modules[+s.dataset.mi].features[+s.dataset.fi];
-  f.status=s.value; const st=stById(f.status); s.style.boxShadow="inset 4px 0 0 "+st.color; Store.save();
-  const dot=el("rowsLayer").querySelector(`.bar[data-mi="${s.dataset.mi}"][data-fi="${s.dataset.fi}"] .sdot`); if(dot) dot.style.background=st.color;
-  renderProgress();
+  const s=e.target, id=s.dataset.nid;
+  apply(P=>{ const f=findNode(P,id); if(f) f.status=s.value; }, {fields:true}); // FIELD edit: renderTimeline refreshes the bar .sdot + progress roll-up
+  const st=stById(s.value); if(st) s.style.boxShadow="inset 4px 0 0 "+st.color;  // F2: grid not rebuilt → patch the select's status colour inline (v1.0.3 style)
 }
+/* All grip-menu (and legacy) actions funnel here. delcol/addfeat keep their own targeting;
+   every other act is node-scoped and resolves the row's data-nid (container OR feature). */
 function onGridAction(e){
   const b=e.currentTarget, act=b.dataset.act, P=proj();
-  if(act==="delcol"){ const cid=b.dataset.col; if(confirm("ลบคอลัมน์นี้และข้อมูลในคอลัมน์?")){ P.customCols=P.customCols.filter(c=>c.id!==cid); P.modules.forEach(m=>m.features.forEach(f=>{ delete f.custom[cid]; })); Store.save(); renderBoard(); } return; }
-  if(act==="addfeat"){ const mEl=b.closest('.modRow'); const mi=(b.dataset.mi!=null)?+b.dataset.mi:(mEl?+mEl.dataset.mi:-1); if(mi>=0) featureModal(mi); return; }
-  const modEl=b.closest('.modRow');
-  if(modEl && (act==="toggle"||act==="delmod"||act==="editmod"||act==="modup"||act==="moddown")){
-    const mi=+modEl.dataset.mi;
-    if(act==="toggle"){ P.modules[mi].collapsed=!P.modules[mi].collapsed; Store.save(); renderBoard(); return; }
-    if(act==="editmod"){ moduleModal(mi); return; }
-    if(act==="modup"){ moveModuleUpDown(mi,-1); return; }
-    if(act==="moddown"){ moveModuleUpDown(mi,1); return; }
-    if(act==="delmod"){
-      const target=P.modules[mi]; if(!target) return;
-      const subs=P.modules.filter(x=>x.parentId===target.id);                  // only a MAIN can have subs (one level deep)
-      const msg=subs.length ? `ลบโมดูล “${target.name}” และฟีเจอร์ทั้งหมด? โมดูลย่อยจะถูกเลื่อนขั้นเป็นโมดูลหลัก`
-                            : `ลบโมดูล “${target.name}” และฟีเจอร์ทั้งหมด?`;
-      if(confirm(msg)){ subs.forEach(s=>{ s.parentId=null; }); P.modules=P.modules.filter(x=>x!==target); normalizeModules(P); Store.save(); renderBoard(); }
+  if(act==="delcol"){ const cid=b.dataset.col; if(confirm("ลบคอลัมน์นี้และข้อมูลในคอลัมน์?")){ apply(P2=>{ P2.customCols=(P2.customCols||[]).filter(c=>c.id!==cid); walkFeatures(P2, f=>{ if(f.custom) delete f.custom[cid]; }); }); } return; }
+  if(act==="addfeat"){ const host=b.closest('.modRow')||b.closest('.addFeat'); const cid=(host?host.dataset.nid:null)||b.dataset.nid; if(cid) featureModal(cid); return; } // R3: opens the modal pre-targeted; nothing is inserted until save
+  const rowEl=b.closest('.modRow')||b.closest('.featRow'); if(!rowEl) return;   // grips (moddrag/rowdrag) fall through to no-op
+  const id=rowEl.dataset.nid;
+  switch(act){
+    case "toggle":   apply(P2=>{ const n=findNode(P2,id); if(n) n.collapsed=!n.collapsed; }); return;
+    case "editmod":
+    case "editfeat": nodeModal(id); return;                                     // D8: unified edit modal for ANY node
+    case "modup":
+    case "up":       moveNodeUpDown(id,-1); return;
+    case "moddown":
+    case "down":     moveNodeUpDown(id,1); return;
+    case "indent":   indent(id);  return;
+    case "outdent":  outdent(id); return;
+    case "promote":  togglePromoteDemote(id); return;                           // ⇄ feature→container OR childless container→feature
+    case "delmod": {                                                            // D1: cascade delete (no silent child-promotion)
+      const node=findNode(P,id); if(!node) return;
+      const n=countAll(node), msg = n>0 ? `ลบ "${node.name}" และ ${n} รายการข้างใน?` : `ลบ "${node.name}"?`;
+      if(confirm(msg)) apply(P2=>{ removeNode(P2,id); });
       return;
     }
+    case "delfeat": { const f=findNode(P,id); if(!f) return; if(confirm(`ลบ "${f.name}"?`)) apply(P2=>{ removeNode(P2,id); }); return; } // a feature has no descendants → plain confirm (N=0)
   }
-  const featEl=b.closest('.featRow'); if(!featEl) return;
-  const mi=+featEl.dataset.mi, fi=+featEl.dataset.fi, feats=P.modules[mi].features;
-  if(act==="delfeat"){ if(confirm(`ลบฟีเจอร์ “${feats[fi].name}”?`)){ feats.splice(fi,1); Store.save(); renderBoard(); } }
-  else if(act==="up"&&fi>0){ [feats[fi-1],feats[fi]]=[feats[fi],feats[fi-1]]; Store.save(); renderBoard(); }
-  else if(act==="down"&&fi<feats.length-1){ [feats[fi+1],feats[fi]]=[feats[fi],feats[fi+1]]; Store.save(); renderBoard(); }
 }
-function addFeature(mi){
-  const P=proj(), t=today();
-  P.modules[mi].features.push({id:nid(),fid:"",name:"ฟีเจอร์ใหม่",description:"",start:iso(t),end:iso(addDays(t,7)),status:"not_started",remark:"",custom:{}});
-  P.modules[mi].collapsed=false; Store.save(); renderBoard();
-  const rows=el("leftBody").querySelectorAll(`.featRow[data-mi="${mi}"]`); const last=rows[rows.length-1]; if(last){ const tx=last.querySelector('.txt'); tx&&tx.focus(); }
+/* up/down: swap a node with its adjacent SIBLING inside its parent's children (or the root
+   list). Unifies feature reorder AND module reorder-among-siblings (§4). Boundary ⇒ no-op. */
+function moveNodeUpDown(id, dir){
+  const sibs=siblingsOf(proj(), id); const i=sibs.findIndex(n=>n&&n.id===id);
+  if(i<0) return; const j=i+dir; if(j<0||j>=sibs.length) return;              // at an edge → no save/render
+  apply(P=>{ const sb=siblingsOf(P,id); const a=sb.findIndex(n=>n&&n.id===id), b2=a+dir; if(a<0||b2<0||b2>=sb.length) return; const t=sb[a]; sb[a]=sb[b2]; sb[b2]=t; });
 }
 
-/* feature modal — fill in details when adding (or editing) a feature */
-function featureModal(mi, fi){
-  const P=proj(), M=P.modules[mi]; if(!M) return;
-  const editing=(fi!=null)?M.features[fi]:null, t=today();
-  const f = editing || {fid:"",name:"",description:"",start:iso(t),end:iso(addDays(t,7)),status:"not_started",remark:""};
+/* ---- STRUCTURE MOVES (spec §5.2) — all through apply() (full render), each returns {flash:id}.
+   Every mutator RE-CHECKS its shared predicate (R5) and no-ops when illegal (the menu only reflects). ---- */
+function indent(id){                                                          // tuck under the previous sibling container (R6 reveal)
+  if(!canIndent(proj(),id)) return;
+  apply(P=>{ if(!canIndent(P,id)) return; const prev=prevSibling(P,id); if(!prev||prev.kind!=="container") return;
+    const g=removeNode(P,id); if(!g) return; if(!Array.isArray(prev.children)) prev.children=[]; prev.children.push(g); revealInto(prev); return {flash:id}; });
+}
+function outdent(id){                                                         // lift into the grandparent's list, right AFTER the former parent
+  if(!canOutdent(proj(),id)) return;
+  apply(P=>{ if(!canOutdent(P,id)) return; const par=findParent(P,id); if(!par) return; const gp=findParent(P,par.id);
+    const g=removeNode(P,id); if(!g) return; const list=gp?gp.children:P.modules;
+    let idx=list.findIndex(n=>n&&n.id===par.id); if(idx<0) idx=list.length-1; list.splice(idx+1,0,g); return {flash:id}; });
+}
+/* R5/G5: pure node transforms — the SINGLE implementation of the feature⇄container conversion,
+   shared by promote()/demote() AND nodeModal's save. Callers own the legality decision
+   (canPromote/canDemote); these just transform. R7: promote keeps ALL feature fields dormant on
+   the node; demote revives them. A demoted node carries NO container-only keys (children/collapsed/
+   features/color) — a feature has no colour of its own (renders with its parent's palette, D8b). */
+function promoteCore(nd){ if(!nd) return; nd.kind="container"; nd.children=[]; nd.collapsed=false; }
+function demoteCore(nd){
+  if(!nd) return;
+  nd.kind="feature"; delete nd.children; delete nd.collapsed; delete nd.features; delete nd.color;
+  if(!nd.custom||typeof nd.custom!=="object") nd.custom={};
+  if(nd.fid==null) nd.fid=""; if(nd.remark==null) nd.remark=""; if(!nd.status) nd.status="not_started";
+  if(!nd.start||!nd.end){ const t=today(); if(!nd.start) nd.start=iso(t); if(!nd.end) nd.end=iso(addDays(t,7)); }
+  if(parse(nd.end)<parse(nd.start)) nd.end=nd.start;
+}
+function promote(id){                                                         // feature → container (R7: ALL feature fields stay dormant on the node)
+  if(!canPromote(proj(),id)) return;
+  apply(P=>{ if(!canPromote(P,id)) return; promoteCore(findNode(P,id)); return {flash:id}; }); // R5: the mutator re-decides inside apply, not the menu
+}
+function demote(id){                                                          // childless NON-ROOT container → feature (dormant fields revive; mirror dropped)
+  if(!canDemote(proj(),id)) return;
+  apply(P=>{ if(!canDemote(P,id)) return; demoteCore(findNode(P,id)); return {flash:id}; }); // R5+G1: root / has-children demote no-ops here even when forced via evaluate
+}
+function togglePromoteDemote(id){ const n=findNode(proj(),id); if(!n) return; if(n.kind==="feature") promote(id); else demote(id); }
+
+/* feature modal — CREATE-ONLY (D8: the unified nodeModal owns all EDIT paths). The grip ＋ / add-zone
+   opens this pre-targeted at a container; R3: creation happens ON SAVE ONLY (nothing inserted before). */
+function featureModal(containerId){
+  const P=proj(), M=findNode(P,containerId); if(!canAddChild(P,containerId)) return;    // R5: containers only (shared predicate — the single legality source)
+  const t=today();
+  const f = {fid:"",name:"",description:"",start:iso(t),end:iso(addDays(t,7)),status:"not_started",remark:""};
   const opts=STATUS.map(s=>`<option value="${s.id}" ${s.id===f.status?'selected':''}>${esc(s.th)}</option>`).join("");
   openModal(`
-    <h2>${editing?"แก้ไขฟีเจอร์":"เพิ่มฟีเจอร์"}</h2>
+    <h2>เพิ่มฟีเจอร์</h2>
     <div class="msub">โมดูล: ${esc(M.name)}</div>
     <div class="field2">
       <div class="field"><label>รหัส · ID</label><input type="text" id="fm_fid" value="${esc(f.fid||"")}" placeholder="เช่น PRO-PR-01"/></div>
@@ -1144,54 +1582,129 @@ function featureModal(mi, fi){
       <div class="field"><label>วันสิ้นสุด · End</label><input type="date" id="fm_end" value="${esc(f.end||iso(addDays(t,7)))}"/></div>
     </div>
     <div class="field"><label>หมายเหตุ · Remark</label><input type="text" id="fm_remark" value="${esc(f.remark||"")}" placeholder="หมายเหตุ (ไม่บังคับ)"/></div>
-    <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="fm_save">${editing?"บันทึก":"เพิ่มฟีเจอร์"}</button></div>`);
+    <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="fm_save">เพิ่มฟีเจอร์</button></div>`);
   el("fm_name").focus();
   el("fm_save").onclick=()=>{
     const name=el("fm_name").value.trim()||"ฟีเจอร์ใหม่";
     let s=el("fm_start").value||iso(t), e=el("fm_end").value||s; if(parse(e)<parse(s)) e=s;
     const data={ fid:el("fm_fid").value.trim(), name, description:el("fm_desc").value.trim(), start:s, end:e, status:el("fm_status").value, remark:el("fm_remark").value.trim() };
-    if(editing){ Object.assign(editing, data); }
-    else { M.features.push({ id:nid(), ...data, custom:{} }); M.collapsed=false; }
-    Store.save(); closeModal(); renderBoard(); toast(editing?"บันทึกฟีเจอร์แล้ว":"เพิ่มฟีเจอร์แล้ว");
+    apply(P2=>{ if(!canAddChild(P2,containerId)) return; const C=findNode(P2,containerId); if(!Array.isArray(C.children)) C.children=[]; const node={ id:nid(), kind:"feature", ...data, custom:{} }; C.children.push(node); revealInto(C); return {focus:node.id, flash:node.id}; }); // R5 re-check + R6: expand the container, focus AND flash the new row (G6c: create flashes, same as move)
+    closeModal(); toast("เพิ่มฟีเจอร์แล้ว");
   };
 }
 
-/* module modal (with short description) */
-function moduleModal(mi){
-  const P=proj(), editing=(mi!=null)?P.modules[mi]:null;
-  let color=editing?editing.color:(P.modules.length%PALETTE.length);
+/* UNIFIED NODE EDIT MODAL (spec §1.5, D8) — ✎ opens this for ANY node. Replaces the EDIT paths of
+   featureModal/moduleModal. Type Feature/Container is wired to promote/demote through the SAME
+   predicates (R5) — locked when a container has children (canDemote false). Parentage changes happen
+   ONLY via indent/outdent/drag (no parent picker here). Cancel leaves the doc byte-identical (R3).
+   D8b: colour is editable on CONTAINERS only (features render with the parent container's palette). */
+function nodeModal(id){
+  const P=proj(), node=findNode(P,id); if(!node) return;
+  const startFeature = node.kind==="feature";
+  const depth = nodeDepth(P,id);
+  const typeLocked = !startFeature && !canDemote(P,id);                       // container with children → cannot become a feature
+  const subOf = k => k==="feature" ? "ฟีเจอร์ · Feature" : (depth===0 ? "โมดูล · Module" : "โมดูลย่อย · Sub-Module"); // depth naming (§1.2)
+  const t=today();
+  const stOpts=STATUS.map(s=>`<option value="${s.id}" ${s.id===node.status?'selected':''}>${esc(s.th)}</option>`).join("");
+  let color=(node.color!=null?node.color:0)%PALETTE.length;
   const sw=PALETTE.map((p,i)=>`<div class="swatch ${i===color?'on':''}" data-c="${i}" style="background:${p.chip}"></div>`).join("");
-  /* Feature 2.2.1 — Module / Sub-Module type + parent picker */
-  const mains=P.modules.filter(m=>m.parentId==null && m!==editing);        // candidate parents (exclude the module being edited)
-  const hasSubs=!!editing && P.modules.some(m=>m.parentId===editing.id);    // a main that already has subs can't become a sub itself
-  const canSub=mains.length>0 && !hasSubs;
-  let kind=(editing && editing.parentId!=null && mains.some(m=>m.id===editing.parentId)) ? "sub" : "main";
-  if(!canSub) kind="main";
-  let parentId=(editing && editing.parentId!=null && mains.some(m=>m.id===editing.parentId)) ? editing.parentId : (mains[0]?mains[0].id:"");
-  const parentOpts=mains.map(m=>`<option value="${esc(m.id)}" ${m.id===parentId?'selected':''}>${esc(m.name)}</option>`).join("");
-  const kindHint=hasSubs ? "มีโมดูลย่อยอยู่ — ย้ายหรือเลื่อนขั้นโมดูลย่อยก่อน"
-              : (mains.length===0 ? "ยังไม่มีโมดูลหลักอื่นให้สังกัด — สร้างโมดูลหลักก่อน" : "");
-  /* create-mode only: optional picker to MOVE existing features (from other modules) into the new module */
+  const hasKids = !startFeature && Array.isArray(node.children) && node.children.length>0;
+  // G1: the Type lock has TWO causes (canDemote false). Has-children ⇒ "remove the children first";
+  // childless ROOT container ⇒ it can never become a feature (root holds containers only).
+  const lockHint = hasKids
+    ? "มีรายการย่อยอยู่ — ต้องไม่มีรายการข้างในจึงจะเปลี่ยนเป็นฟีเจอร์ได้"
+    : "โมดูลระดับบนสุดเปลี่ยนเป็นฟีเจอร์ไม่ได้";
+  const h2Title = startFeature ? "แก้ไขฟีเจอร์" : (depth===0 ? "แก้ไขโมดูล" : "แก้ไขโมดูลย่อย"); // §1.2 depth naming, consistent with the grip tooltip
+  openModal(`
+    <h2>${h2Title}</h2>
+    <div class="msub" id="nm_sub">${esc(subOf(node.kind))}</div>
+    <div class="field2" id="nm_fidRow" style="${startFeature?'':'display:none'}">
+      <div class="field"><label>รหัส · ID</label><input type="text" id="nm_fid" value="${esc(node.fid||"")}" placeholder="เช่น PRO-PR-01"/></div>
+      <div class="field"><label>สถานะ · Status</label><select id="nm_status">${stOpts}</select></div>
+    </div>
+    <div class="field"><label>ประเภท · Type</label>
+      <div class="seg" id="nm_type">
+        <button type="button" data-t="feature" class="${startFeature?'on':''}" ${typeLocked?'disabled':''}>ฟีเจอร์ · Feature</button>
+        <button type="button" data-t="container" class="${startFeature?'':'on'}" ${typeLocked?'disabled':''}>โมดูล · Container</button>
+      </div>
+      ${typeLocked?`<div class="mmKindHint" id="nm_lockHint">${esc(lockHint)}</div>`:""}
+    </div>
+    <div class="field"><label>ชื่อ · Name</label><input type="text" id="nm_name" value="${esc(node.name||"")}" placeholder="ตั้งชื่อ…"/></div>
+    <div class="field"><label>คำอธิบาย · Description</label><textarea id="nm_desc" placeholder="อธิบายสั้น ๆ (ไม่บังคับ)">${esc(node.description||"")}</textarea></div>
+    <div class="field" id="nm_colorRow" style="${startFeature?'display:none':''}"><label>สี · Colour</label><div class="swatches" id="nm_sw">${sw}</div></div>
+    <div class="field2" id="nm_dateRow" style="${startFeature?'':'display:none'}">
+      <div class="field"><label>วันเริ่ม · Start</label><input type="date" id="nm_start" value="${esc(node.start||iso(t))}"/></div>
+      <div class="field"><label>วันสิ้นสุด · End</label><input type="date" id="nm_end" value="${esc(node.end||iso(addDays(t,7)))}"/></div>
+    </div>
+    <div class="field" id="nm_remarkRow" style="${startFeature?'':'display:none'}"><label>หมายเหตุ · Remark</label><input type="text" id="nm_remark" value="${esc(node.remark||"")}" placeholder="หมายเหตุ (ไม่บังคับ)"/></div>
+    <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="nm_save">บันทึก</button></div>`);
+  el("modalRoot").querySelectorAll('#nm_sw .swatch').forEach(s=> s.onclick=()=>{ color=+s.dataset.c; el("modalRoot").querySelectorAll('#nm_sw .swatch').forEach(x=>x.classList.toggle('on',x===s)); });
+  let selType = startFeature ? "feature" : "container";
+  const typeSeg=el("nm_type");
+  const applyTypeUI=()=>{
+    const feat = selType==="feature";
+    el("nm_fidRow").style.display    = feat?'':'none';
+    el("nm_dateRow").style.display   = feat?'':'none';
+    el("nm_remarkRow").style.display = feat?'':'none';
+    el("nm_colorRow").style.display  = feat?'none':'';   // colour on containers only (D8b)
+    el("nm_sub").textContent = subOf(feat?"feature":"container");
+  };
+  typeSeg.querySelectorAll('button').forEach(b=> b.onclick=()=>{ if(b.disabled) return; selType=b.dataset.t; typeSeg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b)); applyTypeUI(); });
+  el("nm_name").focus();
+  el("nm_save").onclick=()=>{
+    const name=el("nm_name").value.trim()||node.name||"ไม่มีชื่อ", desc=el("nm_desc").value.trim();
+    const wantContainer=(selType==="container");
+    let s=el("nm_start").value||node.start||iso(t), e=el("nm_end").value||s; if(parse(e)<parse(s)) e=s;
+    const fid=el("nm_fid").value.trim(), status=el("nm_status").value, remark=el("nm_remark").value.trim();
+    apply(P2=>{
+      const nd=findNode(P2,id); if(!nd) return;
+      nd.name=name; nd.description=desc;
+      if(wantContainer){
+        if(nd.kind==="feature"){ if(!canPromote(P2,id)) return; promoteCore(nd); }                       // G5: promote via the shared core (R5 re-check, not the UI)
+        nd.color=color;
+      } else {
+        if(nd.kind==="container"){ if(!canDemote(P2,id)) return; demoteCore(nd); }                        // G5: demote via the shared core (R5+G1 re-check: childless NON-root only)
+        if(!nd.custom||typeof nd.custom!=="object") nd.custom={};
+        nd.fid=fid; nd.start=s; nd.end=e; nd.status=status; nd.remark=remark;                            // feature field edits (end≥start clamped above)
+      }
+      return {flash:id};
+    });
+    closeModal(); toast("บันทึกแล้ว");
+  };
+}
+
+/* module modal — CREATE-ONLY (D8: nodeModal owns all EDIT paths; a container's parentage now
+   changes ONLY via indent/outdent/drag). Creates a root container ("main") or a child container
+   under a chosen parent ("sub"); optional picker moves existing features into the new module. */
+function moduleModal(){
+  const P=proj();
+  let color=(P.modules.length%PALETTE.length);
+  const sw=PALETTE.map((p,i)=>`<div class="swatch ${i===color?'on':''}" data-c="${i}" style="background:${p.chip}"></div>`).join("");
+  const parents=[]; walkTree(P.modules, n=>{ if(n.kind==="container") parents.push(n); });    // any container can be a parent
+  const canSub=parents.length>0;
+  let kind="main";
+  let parentId=parents[0]?parents[0].id:"";
+  const parentOpts=parents.map(m=>`<option value="${esc(m.id)}" ${m.id===parentId?'selected':''}>${esc(m.name)}</option>`).join("");
+  const kindHint=parents.length===0 ? "ยังไม่มีโมดูลหลักอื่นให้สังกัด — สร้างโมดูลหลักก่อน" : "";
+  /* optional picker to MOVE existing features (from any container) into the new module */
   let pickerHtml="";
-  if(!editing){
-    const totalFeats=P.modules.reduce((a,m)=>a+m.features.length,0);
-    if(totalFeats===0){
-      pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpEmpty">ยังไม่มีฟีเจอร์ให้ย้าย — สร้างฟีเจอร์ในโมดูลอื่นก่อน</div></div>`;
-    }else{
-      const groups=P.modules.map(m=>{
-        if(!m.features.length) return "";
-        const p=PALETTE[m.color%PALETTE.length];
-        const rows=m.features.map(f=>`<label class="mpFeat"><input type="checkbox" class="mpChk" data-featid="${esc(f.id)}"/>${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}<span class="mpFeatName">${esc(f.name)}</span></label>`).join("");
-        return `<div class="mpGroup"><label class="mpHead"><input type="checkbox" class="mpAll"/><span class="chip" style="background:${p.chip}"></span><span class="mpModName">${esc(m.name)}</span><span class="count">${m.features.length}</span></label>${rows}</div>`;
-      }).join("");
-      pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpList" id="mm_pick">${groups}</div><div class="mpCounter" id="mm_pickCount">เลือกแล้ว 0 ฟีเจอร์</div></div>`;
-    }
+  let totalFeats=0; walkFeatures(P, ()=>totalFeats++);
+  if(totalFeats===0){
+    pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpEmpty">ยังไม่มีฟีเจอร์ให้ย้าย — สร้างฟีเจอร์ในโมดูลอื่นก่อน</div></div>`;
+  }else{
+    const grp=[]; walkTree(P.modules, n=>{ if(n.kind==="container"){ const df=directFeatures(n); if(df.length) grp.push({m:n,feats:df}); } });
+    const groups=grp.map(({m,feats})=>{
+      const p=PALETTE[(m.color||0)%PALETTE.length];
+      const rows=feats.map(f=>`<label class="mpFeat"><input type="checkbox" class="mpChk" data-featid="${esc(f.id)}"/>${f.fid?`<span class="fid">${esc(f.fid)}</span>`:""}<span class="mpFeatName">${esc(f.name)}</span></label>`).join("");
+      return `<div class="mpGroup"><label class="mpHead"><input type="checkbox" class="mpAll"/><span class="chip" style="background:${p.chip}"></span><span class="mpModName">${esc(m.name)}</span><span class="count">${feats.length}</span></label>${rows}</div>`;
+    }).join("");
+    pickerHtml=`<div class="field"><label>ย้ายฟีเจอร์เข้าโมดูลนี้ · Move features into this module (ไม่บังคับ)</label><div class="mpList" id="mm_pick">${groups}</div><div class="mpCounter" id="mm_pickCount">เลือกแล้ว 0 ฟีเจอร์</div></div>`;
   }
   openModal(`
-    <h2>${editing?"แก้ไขโมดูล":"สร้างโมดูล"}</h2>
+    <h2>สร้างโมดูล</h2>
     <div class="msub">โมดูลคือกลุ่มของฟีเจอร์ในแผนงาน</div>
-    <div class="field"><label>ชื่อโมดูล · Module name</label><input type="text" id="mm_name" value="${editing?esc(editing.name):""}" placeholder="เช่น Procurement P2P (Section B)"/></div>
-    <div class="field"><label>คำอธิบายสั้น · Short description</label><textarea id="mm_desc" placeholder="อธิบายสั้น ๆ เช่น 43 features — PR, PO, GR, Reports">${editing?esc(editing.description||""):""}</textarea></div>
+    <div class="field"><label>ชื่อโมดูล · Module name</label><input type="text" id="mm_name" value="" placeholder="เช่น Procurement P2P (Section B)"/></div>
+    <div class="field"><label>คำอธิบายสั้น · Short description</label><textarea id="mm_desc" placeholder="อธิบายสั้น ๆ เช่น 43 features — PR, PO, GR, Reports"></textarea></div>
     <div class="field"><label>ประเภท · Type</label>
       <div class="seg" id="mm_kind">
         <button type="button" data-k="main" class="${kind==='main'?'on':''}">โมดูลหลัก · Module</button>
@@ -1202,7 +1715,7 @@ function moduleModal(mi){
     <div class="field" id="mm_parentField" style="${kind==='sub'?'':'display:none'}"><label>สังกัดโมดูลหลัก · Parent module</label><select id="mm_parent" ${canSub?'':'disabled'}>${parentOpts}</select></div>
     <div class="field"><label>สี · Colour</label><div class="swatches" id="mm_sw">${sw}</div></div>
     ${pickerHtml}
-    <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="mm_save">${editing?"บันทึก":"สร้างโมดูล"}</button></div>`);
+    <div class="modActsRow"><button class="btn" data-act="cancel">ยกเลิก</button><button class="btn primary" id="mm_save">สร้างโมดูล</button></div>`);
   el("modalRoot").querySelectorAll('#mm_sw .swatch').forEach(s=> s.onclick=()=>{ color=+s.dataset.c; el("modalRoot").querySelectorAll('#mm_sw .swatch').forEach(x=>x.classList.toggle('on',x===s)); });
   const kindSeg=el("mm_kind"), parentField=el("mm_parentField");
   kindSeg.querySelectorAll('button').forEach(b=> b.onclick=()=>{ if(b.disabled) return; kind=b.dataset.k; kindSeg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b)); if(parentField) parentField.style.display=(kind==='sub')?'':'none'; });
@@ -1223,22 +1736,18 @@ function moduleModal(mi){
   el("mm_save").onclick=()=>{
     const name=el("mm_name").value.trim()||"โมดูลใหม่", desc=el("mm_desc").value.trim();
     const pSel=el("mm_parent");
-    const newParent=(kind==='sub' && pSel && pSel.value) ? pSel.value : null;   // null ⇒ MAIN; set ⇒ SUB of that main
-    if(editing){ editing.name=name; editing.description=desc; editing.color=color; editing.parentId=newParent; normalizeModules(P); Store.save(); closeModal(); renderBoard(); toast("บันทึกโมดูลแล้ว"); return; }
-    const newMod={id:nid(),name,description:desc,color,collapsed:false,features:[],parentId:newParent};
-    P.modules.push(newMod);
+    const newParentId=(kind==='sub' && pSel && pSel.value) ? pSel.value : null;   // null ⇒ root container; set ⇒ child of that container
+    let selIds=[]; const pk=el("mm_pick"); if(pk) selIds=Array.from(pk.querySelectorAll('.mpChk:checked')).map(c=>c.dataset.featid);
     let moved=0;
-    if(pick){
-      const selIds=Array.from(pick.querySelectorAll('.mpChk:checked')).map(c=>c.dataset.featid); // collect ids first (remove by id, not index)
-      selIds.forEach(fid=>{
-        for(const m of P.modules){
-          if(m===newMod) continue;
-          const idx=m.features.findIndex(f=>f.id===fid);
-          if(idx>=0){ newMod.features.push(m.features.splice(idx,1)[0]); moved++; break; } // preserve object ref + source order
-        }
-      });
-    }
-    normalizeModules(P); Store.save(); closeModal(); renderBoard();
+    apply(P2=>{
+      const node={id:nid(),kind:"container",name,description:desc,color,collapsed:false,children:[]};
+      const np=newParentId?findNode(P2,newParentId):null;
+      if(np && np.kind==="container"){ if(!Array.isArray(np.children)) np.children=[]; np.children.push(node); revealInto(np); }
+      else P2.modules.push(node);
+      selIds.forEach(fid=>{ const f=findNode(P2,fid); if(f && f.kind==="feature"){ const g=removeNode(P2,fid); if(g){ node.children.push(g); moved++; } } }); // move picked features in (preserve object ref)
+      return {flash:node.id};                                                    // G6c: create flashes the new module row (same reveal-and-flash rule as a move, R6)
+    });
+    closeModal();
     toast(moved>0 ? `สร้างโมดูลแล้ว · ย้าย ${moved} ฟีเจอร์เข้าโมดูล` : "สร้างโมดูลแล้ว");
   };
 }
@@ -1275,8 +1784,8 @@ let drag=null;
 function bindBars(){ el("rowsLayer").querySelectorAll('.bar').forEach(bar=> bar.addEventListener('pointerdown', onBarDown)); }
 function onBarDown(e){
   const bar=e.currentTarget, mode=e.target.dataset.mode||'move', P=proj();
-  const mi=+bar.dataset.mi, fi=+bar.dataset.fi, f=P.modules[mi].features[fi], r=getRange(), ppd=pxPerDay();
-  drag={bar,mode,mi,fi,f,ppd,rStart:r.start,startX:e.clientX,oS:daysBetween(r.start,f.start),oE:daysBetween(r.start,f.end)};
+  const id=bar.dataset.nid, f=findNode(P,id); if(!f) return; const r=getRange(), ppd=pxPerDay();
+  drag={bar,mode,id,ppd,rStart:r.start,startX:e.clientX,oS:daysBetween(r.start,f.start),oE:daysBetween(r.start,f.end)};
   bar.classList.add('dragging'); bar.setPointerCapture(e.pointerId); document.body.style.userSelect='none';
   window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp); e.preventDefault();
 }
@@ -1285,11 +1794,11 @@ function onBarMove(e){
   if(drag.mode==='move'){ s+=delta; en+=delta; } else if(drag.mode==='l'){ s=Math.min(drag.oS+delta,en); } else { en=Math.max(drag.oE+delta,s); }
   drag.bar.style.left=(s*drag.ppd+1)+"px"; drag.bar.style.width=((en-s+1)*drag.ppd-2)+"px";
   const ns=iso(addDays(drag.rStart,s)), ne=iso(addDays(drag.rStart,en));
-  const si=el("leftBody").querySelector(`input[data-mi="${drag.mi}"][data-fi="${drag.fi}"][data-field="start"]`);
-  const ei=el("leftBody").querySelector(`input[data-mi="${drag.mi}"][data-fi="${drag.fi}"][data-field="end"]`);
+  const si=el("leftBody").querySelector('input[data-nid="'+cssEsc(drag.id)+'"][data-field="start"]');
+  const ei=el("leftBody").querySelector('input[data-nid="'+cssEsc(drag.id)+'"][data-field="end"]');
   if(si) si.value=ns; if(ei) ei.value=ne; drag._s=ns; drag._e=ne;
 }
-function onBarUp(){ window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); if(!drag) return; document.body.style.userSelect=''; if(drag._s){ drag.f.start=drag._s; drag.f.end=drag._e; Store.save(); } drag.bar.classList.remove('dragging'); drag=null; renderTimeline(); } // idempotent: a second invocation is a safe no-op
+function onBarUp(){ window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); if(!drag) return; document.body.style.userSelect=''; const d=drag; drag=null; d.bar.classList.remove('dragging'); if(d._s){ apply(P=>{ const f=findNode(P,d.id); if(f){ f.start=d._s; f.end=d._e; } }); } else renderTimeline(); } // commit through apply() (R2); a no-move drag just re-renders to snap back
 
 /* =====================  ROW DRAG-REORDER  ===================== */
 let rowDrag=null;
@@ -1297,25 +1806,25 @@ function clearDrop(){ document.querySelectorAll('.dropBefore,.dropAfter,.dropInt
 function onRowDragStart(e){
   e.preventDefault();
   const featEl=e.target.closest('.featRow'); if(!featEl) return;
-  rowDrag={ smi:+featEl.dataset.mi, sfi:+featEl.dataset.fi, target:null, lastX:e.clientX, lastY:e.clientY, raf:0 };
+  rowDrag={ snid:featEl.dataset.nid, target:null, lastX:e.clientX, lastY:e.clientY, raf:0 };
   const g=featEl.cloneNode(true); g.classList.add('rowGhost'); g.style.pointerEvents='none'; g.style.width=featEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
   document.body.appendChild(g); rowDrag.ghost=g; document.body.style.userSelect='none';
   rowDrag.raf=requestAnimationFrame(rowDragAutoScroll);
   window.addEventListener('pointermove', onRowDragMove); window.addEventListener('pointerup', onRowDragUp);
 }
-/* Hit-test the point (x,y) and mark the drop target: over a featRow → insert
-   before/after it; over a module header or a collapsed module → insert at top;
-   over the "เพิ่มฟีเจอร์" add-zone → append at the end of that module. */
+/* §4 feature-drag: over a featRow → insert before/after it in ITS parent's children;
+   over a container header (.modRow) → insert at the FRONT of that container's children;
+   over the "เพิ่มฟีเจอร์" add-zone → APPEND into that container. Targets = containers at any depth. */
 function rowDragEval(x,y){
   if(!rowDrag) return;
   clearDrop(); rowDrag.target=null;
   const under=document.elementFromPoint(x,y); if(!under||!under.closest) return;
   const row=under.closest('.featRow');
-  if(row){ const rc=row.getBoundingClientRect(); const before=y<rc.top+rc.height/2; rowDrag.target={mi:+row.dataset.mi,fi:+row.dataset.fi,before}; row.classList.add(before?'dropBefore':'dropAfter'); return; }
+  if(row){ const rc=row.getBoundingClientRect(); const before=y<rc.top+rc.height/2; rowDrag.target={kind:'feat', refId:row.dataset.nid, before}; row.classList.add(before?'dropBefore':'dropAfter'); return; }
   const add=under.closest('.addFeat');
-  if(add){ const mi=+add.dataset.mi, P=proj(); const n=(P&&P.modules[mi])?P.modules[mi].features.length:0; rowDrag.target={mi,fi:n,before:true}; add.classList.add('dropInto'); return; }
+  if(add){ rowDrag.target={kind:'into', containerId:add.dataset.nid}; add.classList.add('dropInto'); return; }        // append into
   const mod=under.closest('.modRow');
-  if(mod){ rowDrag.target={mi:+mod.dataset.mi,fi:0,before:true}; mod.classList.add('dropInto'); }
+  if(mod){ rowDrag.target={kind:'into', containerId:mod.dataset.nid, front:true}; mod.classList.add('dropInto'); }   // insert at front
 }
 function onRowDragMove(e){
   if(!rowDrag) return;
@@ -1347,37 +1856,55 @@ function onRowDragUp(){
   if(rowDrag.raf) cancelAnimationFrame(rowDrag.raf);
   if(rowDrag.ghost) rowDrag.ghost.remove(); clearDrop();
   const d=rowDrag; rowDrag=null; if(!d.target) return;
-  moveFeature(d.smi,d.sfi,d.target.mi,d.target.fi,d.target.before);
+  moveFeature(d.snid, d.target);
 }
-function moveFeature(smi,sfi,tmi,tfi,before){
-  const P=proj(); const feat=P.modules[smi].features[sfi];
-  P.modules[smi].features.splice(sfi,1);
-  let idx=tfi; if(smi===tmi && sfi<tfi) idx=tfi-1; if(!before) idx+=1;
-  if(idx<0) idx=0; if(idx>P.modules[tmi].features.length) idx=P.modules[tmi].features.length;
-  P.modules[tmi].features.splice(idx,0,feat);
-  Store.save(); renderBoard();
+function moveFeature(srcId, target){
+  if(target.kind==='feat' && target.refId===srcId) return;                    // dropped on itself → no-op
+  apply(P=>{
+    const feat=findNode(P,srcId); if(!feat || feat.kind!=="feature") return;
+    if(target.kind==='feat'){
+      const refPar=findParent(P,target.refId); const arr=refPar?refPar.children:P.modules;
+      if(arr.findIndex(n=>n&&n.id===target.refId)<0) return;                   // F4: validate the drop ref BEFORE removing src (mirror the 'into' branch) — invalid ref ⇒ tree untouched
+      removeNode(P,srcId);
+      let idx=arr.findIndex(n=>n&&n.id===target.refId); if(idx<0) return;      // re-locate after removal (index may have shifted)
+      if(!target.before) idx+=1; if(idx<0) idx=0; if(idx>arr.length) idx=arr.length;
+      arr.splice(idx,0,feat);
+      if(refPar) revealInto(refPar);
+    } else { // into a container
+      const C=findNode(P,target.containerId); if(!C || C.kind!=="container") return;
+      removeNode(P,srcId);
+      if(!Array.isArray(C.children)) C.children=[];
+      if(target.front) C.children.unshift(feat); else C.children.push(feat);
+      revealInto(C);                                                          // R6: expand the container we dropped INTO
+    }
+    return {flash:srcId};
+  });
 }
 
-/* =====================  MODULE DRAG-REORDER + MOVE BUTTONS (Feature 2.1)  =====================
-   Clone of the feature-row pointer DnD, but the unit is a MODULE: a MAIN moves as a
-   whole block (main + its subs); a SUB inserts next to another sub (adopting its
-   parentId) or drops onto a MAIN modRow to become that main's first sub. Reuses
-   elementFromPoint hit-testing + edge auto-scroll (with the right pane mirrored). */
+/* =====================  MODULE DRAG-REORDER (siblings only, §4)  =====================
+   v1.0.4 module grip drag reorders among SIBLINGS of the same parent ONLY (cross-level moves
+   are the stage-2 indent/outdent buttons). A dragged container moves as a whole node — its
+   subtree travels with it. Reuses elementFromPoint hit-testing + edge auto-scroll. */
 let modDrag=null;
-function clearModDrop(){ document.querySelectorAll('.modRow.modDropBefore,.modRow.modDropAfter').forEach(x=>x.classList.remove('modDropBefore','modDropAfter')); }
-/* resolve the module index (+ which row kind) under a point — modRow, featRow, or addFeat all map to a module */
-function modAtPoint(x,y){
-  const under=document.elementFromPoint(x,y); if(!under||!under.closest) return null;
-  const mod=under.closest('.modRow'); if(mod) return {mi:+mod.dataset.mi, el:mod, kind:'mod'};
-  const feat=under.closest('.featRow'); if(feat) return {mi:+feat.dataset.mi, el:feat, kind:'feat'};
-  const add=under.closest('.addFeat'); if(add) return {mi:+add.dataset.mi, el:add, kind:'add'};
+function clearModDrop(){ document.querySelectorAll('.modDropBefore,.modDropAfter,.dropBefore,.dropAfter').forEach(x=>x.classList.remove('modDropBefore','modDropAfter','dropBefore','dropAfter')); }
+/* Climb from a hovered node to the ancestor that is a SIBLING of the dragged node (shares its
+   parent). Returns that sibling id, or null when the hover sits in a different subtree/level. */
+function siblingAncestor(P, hoverId, draggedId){
+  const dpar=findParent(P,draggedId), dparId=dpar?dpar.id:null;
+  let cur=hoverId;
+  while(cur){
+    const par=findParent(P,cur), parId=par?par.id:null;
+    if(parId===dparId) return cur;                        // cur shares dragged's parent ⇒ a sibling
+    if(!par) return null;                                 // reached a root whose parent differs ⇒ different subtree
+    cur=par.id;
+  }
   return null;
 }
 function onModDragStart(e){
   e.preventDefault();
   const modEl=e.target.closest('.modRow'); if(!modEl) return;
-  const P=proj(), mi=+modEl.dataset.mi; if(!P||!P.modules[mi]) return;
-  modDrag={ mi, target:null, lastX:e.clientX, lastY:e.clientY, raf:0, ghost:null };
+  const P=proj(), id=modEl.dataset.nid; if(!findNode(P,id)) return;
+  modDrag={ id, target:null, lastX:e.clientX, lastY:e.clientY, raf:0, ghost:null };
   const g=modEl.cloneNode(true); g.classList.add('modGhost'); g.style.pointerEvents='none'; g.style.width=modEl.offsetWidth+"px"; g.style.left=(e.clientX-18)+"px"; g.style.top=(e.clientY-14)+"px";
   document.body.appendChild(g); modDrag.ghost=g; document.body.style.userSelect='none';
   modDrag.raf=requestAnimationFrame(modDragAutoScroll);
@@ -1389,33 +1916,19 @@ function onModDragMove(e){
   modDrag.ghost.style.left=(e.clientX-18)+"px"; modDrag.ghost.style.top=(e.clientY-14)+"px";
   modDragEval(e.clientX, e.clientY);
 }
-/* Hit-test the point and mark the drop target (main-block vs sub semantics). */
+/* Mark a drop target ONLY when the hovered row resolves to a SIBLING of the dragged node. */
 function modDragEval(x,y){
   if(!modDrag) return;
   clearModDrop(); modDrag.target=null;
-  const P=proj(), mods=P.modules, dragged=mods[modDrag.mi]; if(!dragged) return;
-  const hit=modAtPoint(x,y); if(!hit) return;
-  const hoverMod=mods[hit.mi]; if(!hoverMod) return;
-  const rc=hit.el.getBoundingClientRect(), before=y<rc.top+rc.height/2;
-  if(dragged.parentId==null){
-    // MAIN → target another whole block; hovering any row of it resolves to that block
-    const tgtMain=mainIndexOf(mods,hit.mi);
-    if(tgtMain===mainIndexOf(mods,modDrag.mi)) return;                       // own block → no target
-    modDrag.target={type:'main', mainIdx:tgtMain, before};
-    const row=el("leftBody").querySelector(`.modRow[data-mi="${tgtMain}"]`);
-    if(row) row.classList.add(before?'modDropBefore':'modDropAfter');
-  } else if(hoverMod.parentId!=null){
-    // SUB over another SUB → insert before/after it (adopts that sub's parentId)
-    if(hoverMod.id===dragged.id) return;
-    modDrag.target={type:'subToSub', tmi:hit.mi, before};
-    const row=el("leftBody").querySelector(`.modRow[data-mi="${hit.mi}"]`);
-    if(row) row.classList.add(before?'modDropBefore':'modDropAfter');
-  } else if(hit.kind==='mod'){
-    // SUB over a MAIN modRow → re-parent as that main's first sub
-    modDrag.target={type:'subToMain', tmi:hit.mi};
-    hit.el.classList.add('modDropBefore');
-  }
-  // SUB over a MAIN's feat/add rows ⇒ no target ⇒ no-op
+  const P=proj(); const under=document.elementFromPoint(x,y); if(!under||!under.closest) return;
+  const rowEl=under.closest('.modRow,.featRow,.addFeat'); if(!rowEl||!rowEl.dataset.nid) return;
+  const sibId=siblingAncestor(P, rowEl.dataset.nid, modDrag.id); if(!sibId || sibId===modDrag.id) return;
+  const rc=rowEl.getBoundingClientRect(), before=y<rc.top+rc.height/2;
+  modDrag.target={sibId, before};
+  const sibRow=el("leftBody").querySelector('.modRow[data-nid="'+cssEsc(sibId)+'"], .featRow[data-nid="'+cssEsc(sibId)+'"]');
+  const mark=sibRow||rowEl;
+  if(mark.classList.contains('modRow')) mark.classList.add(before?'modDropBefore':'modDropAfter');
+  else mark.classList.add(before?'dropBefore':'dropAfter');
 }
 /* Edge auto-scroll the left pane while dragging; keep the right pane's scrollTop mirrored. */
 function modDragAutoScroll(){
@@ -1440,55 +1953,21 @@ function onModDragUp(){
   if(modDrag.raf) cancelAnimationFrame(modDrag.raf);
   if(modDrag.ghost) modDrag.ghost.remove(); clearModDrop();
   const d=modDrag; modDrag=null; if(!d.target) return;
-  const P=proj(), mods=P.modules, dragged=mods[d.mi]; if(!dragged) return;
-  const before=moduleOrderSig(mods);                                         // capture BEFORE any parentId mutation
-  let next=null;
-  if(d.target.type==='main'){
-    next=computeMainBlockMove(mods, d.mi, d.target.mainIdx, d.target.before);
-  } else if(d.target.type==='subToSub'){
-    const tgt=mods[d.target.tmi]; if(!tgt) return;
-    dragged.parentId=tgt.parentId;
-    const rest=mods.filter(m=>m!==dragged);
-    let ti=rest.findIndex(m=>m.id===tgt.id); if(ti<0) return; if(!d.target.before) ti+=1;
-    next=rest.slice(0,ti).concat([dragged], rest.slice(ti));
-  } else if(d.target.type==='subToMain'){
-    const main=mods[d.target.tmi]; if(!main) return;
-    dragged.parentId=main.id;
-    const rest=mods.filter(m=>m!==dragged);
-    let ti=rest.findIndex(m=>m.id===main.id); if(ti<0) return; ti+=1;         // right after the main = first sub
-    next=rest.slice(0,ti).concat([dragged], rest.slice(ti));
-  }
-  commitModuleMove(P, before, next);
+  moveNodeBeside(d.id, d.target.sibId, d.target.before);
 }
-/* Reordered array that moves a MAIN block before/after a target block. */
-function computeMainBlockMove(mods, srcMainIdx, tgtMainIdx, before){
-  const [s0,s1]=blockRange(mods,srcMainIdx), block=mods.slice(s0,s1);
-  const rest=mods.slice(0,s0).concat(mods.slice(s1));
-  const ri=rest.findIndex(m=>m.id===mods[tgtMainIdx].id); if(ri<0) return null;
-  const [rt0,rt1]=blockRange(rest, ri), at=before?rt0:rt1;
-  return rest.slice(0,at).concat(block, rest.slice(at));
-}
-/* modup/moddown: a MAIN swaps with the adjacent MAIN block; a SUB swaps with the adjacent sibling sub. */
-function moveModuleUpDown(mi, dir){
-  const P=proj(), mods=P.modules, m=mods[mi]; if(!m) return;
-  const before=moduleOrderSig(mods); let next=null;
-  if(m.parentId==null){
-    const [s0,s1]=blockRange(mods,mi);
-    if(dir<0){ if(s0<=0) return; const [p0,p1]=blockRange(mods, mainIndexOf(mods,s0-1)); next=mods.slice(0,p0).concat(mods.slice(s0,s1), mods.slice(p0,p1), mods.slice(s1)); }
-    else { if(s1>=mods.length) return; const [n0,n1]=blockRange(mods,s1); next=mods.slice(0,s0).concat(mods.slice(n0,n1), mods.slice(s0,s1), mods.slice(n1)); }
-  } else {
-    const sibs=[]; mods.forEach((x,i)=>{ if(x.parentId===m.parentId) sibs.push(i); });
-    const pos=sibs.indexOf(mi), sw=dir<0?sibs[pos-1]:sibs[pos+1]; if(sw==null) return;
-    next=mods.slice(); [next[mi],next[sw]]=[next[sw],next[mi]];
-  }
-  commitModuleMove(P, before, next);
-}
-/* Commit a reordered module array only if it actually changed (drop-in-place ⇒ no-op). */
-function commitModuleMove(P, beforeSig, next){
-  if(!next) return false;
-  const test={modules:next.slice()}; normalizeModules(test);
-  if(moduleOrderSig(test.modules)===beforeSig) return false;                  // no change → no save, no render
-  P.modules=test.modules; Store.save(); renderBoard(); return true;
+/* Reorder `id` before/after a SIBLING (`sibId`) within their shared parent's children (or the
+   root list). Drop-in-place ⇒ no-op (no save/render). */
+function moveNodeBeside(id, sibId, before){
+  if(!id || !sibId || id===sibId) return;
+  const P=proj();
+  const par=findParent(P,id), spar=findParent(P,sibId);
+  if((par?par.id:null)!==(spar?spar.id:null)) return;                         // siblings-only guard
+  const arr=par?par.children:P.modules;
+  const from=arr.findIndex(n=>n&&n.id===id), ref=arr.findIndex(n=>n&&n.id===sibId);
+  if(from<0||ref<0) return;
+  let to=ref+(before?0:1); if(from<to) to-=1;                                 // account for the removal shift
+  if(to===from) return;                                                       // already in place
+  apply(P2=>{ const a=findParent(P2,id), list=a?a.children:P2.modules; const g=removeNode(P2,id); if(!g) return; let t=list.findIndex(n=>n&&n.id===sibId); if(t<0){ list.push(g); return {flash:id}; } if(!before) t+=1; list.splice(t,0,g); return {flash:id}; }); // R6: flash the reordered module
 }
 
 /* =====================  COLUMN DRAG-REORDER  ===================== */
@@ -1547,7 +2026,7 @@ function onColResizeMove(e){
   w=Math.max(60, Math.min(640, w)); colResize.w=w;
   colResize.head.style.width=w+'px';                 // live: header
   const lb=el("leftBody");
-  lb.querySelectorAll('.featRow').forEach(fr=>{ const cell=fr.children[colResize.idx]; if(cell) cell.style.width=w+'px'; }); // live: every cell in this column
+  lb.querySelectorAll('.featRow .rowMain').forEach(rm=>{ const cell=rm.children[colResize.idx]; if(cell) cell.style.width=w+'px'; }); // live: every cell in this column (G2: cells now live inside .rowMain, not as direct featRow children)
   const total=[...el("leftHead").children].reduce((a,h)=>a+h.getBoundingClientRect().width,0);
   lb.querySelectorAll('.modRow').forEach(r=> r.style.width=total+'px'); // keep module bands spanning full width
   if(ui.wrapTxt) syncRowHeights();                   // content-driven row height follows the new width live
@@ -1575,13 +2054,15 @@ function exportXlsx(){
   const P=proj(), customLabels=P.customCols.map(c=>c.label);
   const header=["Module","Feature ID","Feature","Description","Start","End","Status","Remark",...customLabels];
   const aoa=[header];
-  P.modules.forEach(m=>{
-    const parent=m.parentId!=null ? P.modules.find(x=>x.id===m.parentId) : null;
-    const modLabel=parent ? (parent.name+" › "+m.name) : m.name;              // sub-module features show "Parent › Sub"
-    m.features.forEach(f=>{
-      aoa.push([modLabel,f.fid||"",f.name,f.description||"",f.start,f.end,stById(f.status).en,f.remark||"",...P.customCols.map(c=>f.custom[c.id]||"")]);
+  // §4: rows in flatten order; Module column = full container path "A › B › C".
+  const path=[];
+  (function rec(nodes){
+    (nodes||[]).forEach(n=>{
+      if(!n) return;
+      if(n.kind==="container"){ path.push(n.name); rec(n.children||[]); path.pop(); }
+      else aoa.push([path.join(" › "),n.fid||"",n.name,n.description||"",n.start,n.end,stById(n.status).en,n.remark||"",...P.customCols.map(c=>(n.custom&&n.custom[c.id])||"")]);
     });
-  });
+  })(P.modules);
   const ws=XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols']=[{wch:26},{wch:11},{wch:30},{wch:40},{wch:12},{wch:12},{wch:13},{wch:18},...customLabels.map(()=>({wch:18}))];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Timeline");
@@ -1629,7 +2110,7 @@ function importWorkbook(buf){
     const name=String(row[map.name]).trim(); if(!name) continue;
     let s=map.start!=null?toISO(row[map.start]):"", e=map.end!=null?toISO(row[map.end]):"";
     if(!s&&!e){ const t=today(); s=iso(t); e=iso(addDays(t,7)); } else if(!e) e=s; else if(!s) s=e;
-    const f={id:nid(),fid:map.fid!=null?String(row[map.fid]).trim():"",name,description:map.description!=null?String(row[map.description]).trim():"",start:s,end:e,status:map.status!=null?statusFromText(row[map.status]):"not_started",remark:map.remark!=null?String(row[map.remark]).trim():"",custom:{}};
+    const f={id:nid(),kind:"feature",fid:map.fid!=null?String(row[map.fid]).trim():"",name,description:map.description!=null?String(row[map.description]).trim():"",start:s,end:e,status:map.status!=null?statusFromText(row[map.status]):"not_started",remark:map.remark!=null?String(row[map.remark]).trim():"",custom:{}};
     customDefs.forEach(cd=> f.custom[cd.id]=String(row[cd.col]??"").trim());
     if(!groups.has(modName)) groups.set(modName,[]); groups.get(modName).push(f);
   }
@@ -1637,9 +2118,10 @@ function importWorkbook(buf){
   P.customCols=customDefs.map(({id,label,w,kind})=>({id,label,w,kind}));
   P.colOrder=DEFAULT_ORDER.concat(P.customCols.map(c=>"c:"+c.id));
   P.modules=[]; let ci=0;
-  groups.forEach((feats,name)=>{ P.modules.push({id:nid(),name,description:"",color:ci++%PALETTE.length,collapsed:false,features:feats}); });
-  P.progressOrder=P.modules.map(m=>m.id);
-  Store.save(); renderTab(ui.tab);
+  // import stays flat (path strings arrive as container names; no round-trip parsing) — build root containers
+  groups.forEach((feats,name)=>{ P.modules.push({id:nid(),kind:"container",name,description:"",color:ci++%PALETTE.length,collapsed:false,children:feats}); });
+  P.docVer=2; P.progressOrder=P.modules.map(m=>m.id);
+  normalizeTree(P); Store.save(); renderTab(ui.tab);
   toast(`นำเข้าแล้ว: ${P.modules.length} โมดูล · ${[...groups.values()].reduce((a,b)=>a+b.length,0)} ฟีเจอร์`);
 }
 
@@ -1648,6 +2130,11 @@ async function exportPng(){
   if(typeof html2canvas==="undefined"){ toast("ไลบรารี PNG โหลดไม่สำเร็จ (ต้องต่ออินเทอร์เน็ต)"); return; }
   const board=el("board"), L=el("leftScroll"), R=el("rightScroll");
   const pl=L.scrollTop, pr=R.scrollLeft; L.scrollTop=R.scrollTop=0; R.scrollLeft=0;
+  /* §1.10: exports FORCE LIGHT — stamp data-theme=light + re-render synchronously so the inline bar fills
+     capture as their light pastels (the dark tokens + dark bar branch never leak into the PNG). Restored in
+     `finally`. renderBoard re-runs the full R10 order (grid → timeline → wrap/heights → sticky labels). */
+  const root=document.documentElement, prevTheme=root.getAttribute("data-theme"), forcedLight=prevTheme!=="light";
+  if(forcedLight){ root.setAttribute("data-theme","light"); renderBoard(); L.scrollTop=R.scrollTop=0; R.scrollLeft=0; }
   updateStickyLabels();                                 // scroll is reset to 0 → clears sliding-label shifts so the snapshot shows labels at bar starts
   board.classList.add('exporting');
   const w=board.scrollWidth, h=Math.max(el("leftBody").scrollHeight, el("bars").scrollHeight)+el("leftHead").offsetHeight+4;
@@ -1656,7 +2143,11 @@ async function exportPng(){
     const c=await html2canvas(board,{backgroundColor:"#ffffff",scale:2,width:w,height:h,windowWidth:w+40,windowHeight:h+40,scrollX:0,scrollY:0,logging:false});
     const a=document.createElement('a'); a.download=safeName(proj().code||proj().name)+"_Timeline.png"; a.href=c.toDataURL("image/png"); a.click(); toast("ส่งออก PNG แล้ว");
   }catch(err){ console.error(err); toast("สร้าง PNG ไม่สำเร็จ"); }
-  finally{ board.classList.remove('exporting'); L.scrollTop=R.scrollTop=pl; R.scrollLeft=pr; updateStickyLabels(); } // restore scroll → re-apply the slide immediately
+  finally{
+    board.classList.remove('exporting');
+    if(forcedLight){ root.setAttribute("data-theme", prevTheme||effectiveTheme()); renderBoard(); } // restore the user's theme + re-render the inline bar fills
+    L.scrollTop=R.scrollTop=pl; R.scrollLeft=pr; updateStickyLabels();                              // restore scroll → re-apply the slide immediately
+  }
 }
 
 /* =====================  MODAL / TOAST  ===================== */
@@ -1679,7 +2170,7 @@ function downloadBackupFile(){
 function restoreFromObject(obj, label){
   if(!obj || !Array.isArray(obj.projects)){ toast("ไฟล์สำรองไม่ถูกต้อง"); return; }
   if(!confirm("กู้คืนข้อมูล" + (label?(" จาก"+label):"") + "? ข้อมูลปัจจุบันทั้งหมดจะถูกแทนที่")) return;
-  DB = obj; MEM = DB; Store.save();      // persists locally + pushes to cloud if enabled
+  DB = obj; migrateDB(DB); MEM = DB; Store.save();      // migrate a possibly-v1 backup → tree, then persist (+ mirror) + cloud push
   PID = null; closeModal(); location.hash = ""; route(); toast("กู้คืนข้อมูลเรียบร้อย");
 }
 function restoreBackupFile(file){
@@ -1763,8 +2254,12 @@ async function backupModal(){
 
 /* =====================  INIT  ===================== */
 Store.load();
+applyTheme();                                          // §1.10: stamp html[data-theme] from ui.theme BEFORE the first render (no light→dark flash)
 route();
 wireDragGuard();                                       // one centralized capture-phase pointerdown/up/cancel guard for background-sync deferral
+wireResizeGuard();                                     // H2: one debounced window-resize listener → refreshes the months-in-view readout (no re-render)
+wireThemeGuard();                                      // §1.10: AUTO mode re-applies the effective theme when the OS prefers-color-scheme flips (wired once)
+wirePrintGuard();                                      // §1.10 T2: force light + re-render inline bar fills on beforeprint, restore on afterprint (wired once; covers the Print button AND Cmd-P)
 window.addEventListener('hashchange', route);
 window.addEventListener('storage', e=>{ if(e.key===LS_KEY && !editingNow()){ Store.load(); route(); } }); // FIX: don't reload/re-render from a cross-tab write while a drag/resize or edit is in flight
 if(cloudOn()){ cloudSync(); window.addEventListener('focus', ()=>cloudPull(false)); setInterval(()=>cloudPull(false), 30000); }
@@ -1772,5 +2267,12 @@ document.addEventListener('keydown', e=>{
   if(e.key==="Escape"){
     if(el("modalRoot").style.display==="block") closeModal();
     else if(el("historyOverlay").style.display==="flex" && PID) location.hash="project="+PID;
+    else {
+      const a=document.activeElement; if(a && a.closest && a.closest('.gripMenu')) a.blur();  // keyboard-opened menu: releases :focus-within
+      // G4: a HOVER-opened menu has no focus to blur → force it shut with .gmSuppress (CSS suppresses
+      // the :hover open even while the pointer stays on the grip), auto-cleared on pointerleave so a
+      // later move-away + re-hover opens it again.
+      document.querySelectorAll('.gripMenu:hover').forEach(gm=>{ gm.classList.add('gmSuppress'); gm.addEventListener('pointerleave', ()=>gm.classList.remove('gmSuppress'), {once:true}); });
+    }
   }
 });

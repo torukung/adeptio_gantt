@@ -80,15 +80,30 @@ test("FIX3: a live drag sets the interaction guard so a storage adopt is deferre
   await gotoTimeline(page);
 
   // Begin (but do NOT finish) a feature-row drag: pointerdown on the grip, then move.
-  const gb = await boxOf(page, '.featRow[data-mi="0"][data-fi="0"] .grip');
+  // v1.0.4: rows addressed by data-nid (minimalDoc's first feature id = "fa1").
+  // FLAKE ROOT CAUSE (hunted 2026-07-18): under full-suite load the topbar/toolbar can reflow LATE,
+  // shifting the grid down between a cached boundingBox read and the press — the press then lands on
+  // the ADJACENT module grip (also matches _DRAG_SEL, so _dragging latches) and starts a MODULE drag
+  // (.modGhost), never a row drag (.rowGhost). Fix: wait until the grip's y is stable across two
+  // rAF-spaced reads, take FRESH coords, and press with no sleep in between (stale window minimized).
+  const gripSel = '.featRow[data-nid="fa1"] .grip';
+  await expect.poll(async () => {
+    const a = await boxOf(page, gripSel);
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    const b = await boxOf(page, gripSel);
+    return Math.abs(a.y - b.y) < 0.5 && Math.abs(a.x - b.x) < 0.5 ? "stable" : "moving";
+  }).toBe("stable");
+  const gb = await boxOf(page, gripSel); // fresh coords, post-stability
   await page.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2);
   await page.mouse.down();
   await page.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2 + 24, { steps: 5 }); // enter rowDrag
 
+  // Self-naming guard: if layout still shifted, the press starts a MODULE drag — fail with the cause.
+  expect(await page.locator(".modGhost").count(), "press landed on the module grip — grid shifted between measure and press").toBe(0);
   // The app reports it is interacting/editing, so cloudPull + the storage listener defer.
   expect(await page.evaluate(() => window["isInteracting"]())).toBe(true);
   expect(await page.evaluate(() => window["editingNow"]())).toBe(true);
-  expect(await page.locator(".rowGhost").count()).toBeGreaterThan(0); // drag is live
+  await expect(page.locator(".rowGhost")).toHaveCount(1); // drag is live (auto-retrying; a real drag failure still fails)
 
   // Simulate a cross-tab write of a DIFFERENT doc + the storage event that drives adoption.
   await page.evaluate((key) => {
@@ -101,8 +116,8 @@ test("FIX3: a live drag sets the interaction guard so a storage adopt is deferre
   // No mid-drag re-render: the original module row is still present and unchanged.
   // (An adopt would run route()->renderProject, resetting to the summary tab and
   //  destroying the grid, which would corrupt the in-flight drag.)
-  await expect(page.locator('.modRow[data-mi="0"] .modName')).toHaveText("Module A");
-  expect(await page.locator(".rowGhost").count()).toBeGreaterThan(0);
+  await expect(page.locator('.modRow[data-nid="mod-a"] .modName')).toHaveText("Module A");
+  await expect(page.locator(".rowGhost")).toHaveCount(1);
 
   await page.mouse.up(); // finish the drag cleanly
   expect(await page.evaluate(() => window["isInteracting"]())).toBe(false);
@@ -126,7 +141,7 @@ test("FIX4: a failed cloud push clears pushPending (no permanent adoption block)
 
   // A mutation schedules a push: pushPending flips true synchronously; cloudPush()
   // fires ~800ms later and fails because the fixture aborts the production host.
-  await page.click('.modRow[data-mi="0"] .caret[data-act="toggle"]');
+  await page.click('.modRow[data-nid="mod-a"] .caret[data-act="toggle"]');
   expect(await page.evaluate(() => window["cloudSyncState"]().pushPending)).toBe(true);
 
   // After the push fails, the latch must return to false (otherwise cloudPull
@@ -146,9 +161,12 @@ test("FIX5: a failed localStorage write shows a warning toast (not silent)", asy
   await page.evaluate(() => { localStorage.setItem = () => { throw new Error("QuotaExceeded"); }; });
 
   // A mutation -> Store.save() -> safeSet() returns false -> one-time warning toast.
-  await page.click('.modRow[data-mi="0"] .caret[data-act="toggle"]');
-  await expect(page.locator("#toast")).toContainText("บันทึกลงเครื่องไม่สำเร็จ");
-  await expect(page.locator("#toast")).toHaveClass(/show/);
+  await page.click('.modRow[data-nid="mod-a"] .caret[data-act="toggle"]');
+  // Single ATOMIC assertion: the locator requires the `.show` class (toast is visible) AND the
+  // failure message is present — both protections in ONE auto-retrying check. Two sequential
+  // assertions could see the 2400ms auto-hide strip `.show` between them (a race); folding `.show`
+  // into the locator removes the gap without weakening either protection.
+  await expect(page.locator("#toast.show")).toContainText("บันทึกลงเครื่องไม่สำเร็จ");
 });
 
 /* ---------- FIX 6 — column widths are namespaced per project ---------- */

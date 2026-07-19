@@ -61,6 +61,11 @@ button{font-family:inherit; cursor:pointer;}
 .seg button:disabled{color:var(--ink-faint); opacity:.5; cursor:not-allowed;}
 .seg button:disabled:hover{color:var(--ink-faint);}
 .seg .lbl{font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); padding:0 8px; align-self:center;}
+/* §1.8 continuous-zoom controls (−/readout/+/fit) reuse the .seg idiom. The readout shows months-in-view
+   (Thai) and keeps a stable width so the number doesn't jitter as it changes. */
+.seg #zoomReadout{min-width:76px; text-align:center; color:var(--ink-soft); text-transform:none; letter-spacing:0; font-size:11px;}
+.seg.zoomCtl button{min-width:30px;}
+#zoomIn,#zoomOut{font-size:14px; line-height:1;}   /* H3b: scope the glyph sizing to the −/+ buttons only, so #zoomFit (พอดี) keeps the standard .seg button typography */
 .eyebrow{font-family:var(--font-body); font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--violet-adpt); font-weight:700;}
 .spring{flex:1 1 auto;}
 .grow{flex:1 1 auto;}
@@ -220,9 +225,17 @@ button{font-family:inherit; cursor:pointer;}
 .colGhost{position:fixed; z-index:90; pointer-events:none; opacity:.92; height:var(--headH); display:flex; align-items:center; padding:0 10px; background:var(--panel); border:1px solid var(--violet-adpt); border-radius:var(--r-sm); font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; color:var(--ink-soft); text-transform:uppercase; box-shadow:var(--shadow-hover);}
 #leftBody{min-width:max-content;}
 
-.modRow{display:flex; align-items:center; gap:8px; height:var(--modH); padding:0 8px 0 6px; background:linear-gradient(180deg,#fbfaff,#f4f2fb); border-bottom:1px solid var(--line-strong); position:relative;}
+.modRow{display:flex; align-items:center; gap:8px; height:var(--modH); padding:0 8px 0 6px; border-bottom:1px solid var(--line-strong); position:relative;
+  background-color:var(--panel);
+  background-image:
+    repeating-linear-gradient(90deg, var(--rail) 0 2px, transparent 2px var(--step)),   /* Stage-2: ancestor rail ladder (only where --ladderW>0) */
+    linear-gradient(var(--shade), var(--shade)),                                         /* Stage-2: stepped indent shading */
+    linear-gradient(180deg,#fbfaff,#f4f2fb);                                             /* base module gradient */
+  background-repeat:no-repeat,no-repeat,no-repeat;
+  background-position:var(--rail-x) 0, 0 0, 0 0;
+  background-size:var(--ladderW) 100%, 100% 100%, 100% 100%;}
 .modRow.dropInto{box-shadow:inset 0 0 0 2px var(--violet-adpt);}
-.addFeat.dropInto{box-shadow:inset 0 0 0 2px var(--violet-adpt); background:#f3ecff;}
+.addFeat.dropInto{box-shadow:inset 0 0 0 2px var(--violet-adpt); background-color:#f3ecff;} /* G3: colour-only, keep the ladder/shade layers */
 .caret{width:18px; height:18px; display:flex; align-items:center; justify-content:center; color:var(--ink-soft); border-radius:6px; flex:0 0 auto;}
 .caret:hover{background:var(--line);}
 .caret svg{width:12px; height:12px; transition:transform .15s;}
@@ -233,20 +246,33 @@ button{font-family:inherit; cursor:pointer;}
 .modName:focus{box-shadow:0 0 0 2px var(--violet-adpt); border-radius:4px;}
 .modDesc{font-size:10.5px; color:var(--ink-faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:280px;}
 .count{font-family:var(--mono); font-size:10.5px; color:var(--ink-faint); background:var(--surface); padding:1px 8px; border-radius:20px; flex:0 0 auto;}
-.modActs{display:flex; gap:2px; margin-left:auto; opacity:0; transition:.12s;}
-.modRow:hover .modActs{opacity:1;}
-/* module grip (Feature 2.1/2.2): always visible, dimmed → full on hover; same visual language as feature-row grips */
-.modGrip{width:16px; flex:0 0 auto; display:flex; align-items:center; justify-content:center; color:var(--grey-light-adpt); cursor:grab; touch-action:none; opacity:.5; transition:opacity .12s, color .12s;}
+/* modMain = the shiftable row content (caret/chip/name/count). It slides right by the measured
+   pill width (--railW) when the grip menu opens, so the menu never overlays content. */
+.modMain{display:flex; align-items:center; gap:8px; flex:1 1 auto; min-width:0; transition:transform .2s var(--ease);}
+/* While the menu is open the shifted content must not intercept clicks meant for the pill (the caret
+   is only used when the menu is CLOSED). pointer-events returns the instant the menu closes. */
+.gripMenu:hover ~ .modMain, .gripMenu:focus-within ~ .modMain{transform:translateX(var(--railW,0px)); pointer-events:none;}
+/* module grip (drag handle + menu trigger): always visible, dimmed → full on hover */
+.modGrip{width:16px; flex:0 0 auto; display:flex; align-items:center; justify-content:center; color:var(--grey-light-adpt); cursor:grab; touch-action:none; opacity:.55; transition:opacity .12s, color .12s;}
 .modGrip:hover{color:var(--ink-soft); opacity:1;}
 .modRow:hover .modGrip{opacity:1;}
 .modGrip svg{width:13px; height:13px;}
-.modRow.modDropBefore{box-shadow:inset 0 3px 0 var(--violet-adpt); background:#f0e9ff;}
-.modRow.modDropAfter{box-shadow:inset 0 -3px 0 var(--violet-adpt); background:#f0e9ff;}
+.modRow.modDropBefore{box-shadow:inset 0 3px 0 var(--violet-adpt); background-color:#f0e9ff;} /* G3: colour-only (modRow carries the rail/shade layers too) */
+.modRow.modDropAfter{box-shadow:inset 0 -3px 0 var(--violet-adpt); background-color:#f0e9ff;}
 
-.featRow{display:flex; align-items:stretch; height:var(--rowH); border-bottom:1px solid var(--line); background:var(--panel);}
-.featRow:hover{background:#faf9ff;}
-.featRow.dropBefore{box-shadow:inset 0 3px 0 var(--violet-adpt); background:#f6f0ff;}
-.featRow.dropAfter{box-shadow:inset 0 -3px 0 var(--violet-adpt); background:#f6f0ff;}
+.featRow{display:flex; align-items:stretch; height:var(--rowH); border-bottom:1px solid var(--line); position:relative;  /* G2: anchor for the absolute grip menu at the row front */
+  background-color:var(--panel);
+  background-image:
+    repeating-linear-gradient(90deg, var(--rail) 0 2px, transparent 2px var(--step)),   /* Stage-2 ancestor rail ladder */
+    linear-gradient(var(--shade), var(--shade));                                         /* Stage-2 stepped shading */
+  background-repeat:no-repeat,no-repeat;
+  background-position:var(--rail-x) 0, 0 0;
+  background-size:var(--ladderW) 100%, 100% 100%;}
+/* G3: hover / drag-mark tints use background-COLOR only — the shorthand would reset background-image
+   and wipe the Stage-2 ancestor-rail ladder + stepped shade layers. */
+.featRow:hover{background-color:#faf9ff;}
+.featRow.dropBefore{box-shadow:inset 0 3px 0 var(--violet-adpt); background-color:#f6f0ff;}
+.featRow.dropAfter{box-shadow:inset 0 -3px 0 var(--violet-adpt); background-color:#f6f0ff;}
 .cell{flex:0 0 auto; border-right:1px solid var(--line); padding:0 8px; display:flex; align-items:center; min-width:0; position:relative;}
 .cell.feat{padding-left:4px;}
 .grip{width:16px; flex:0 0 auto; display:flex; align-items:center; justify-content:center; color:var(--grey-light-adpt); cursor:grab; touch-action:none;}
@@ -263,12 +289,24 @@ button{font-family:inherit; cursor:pointer;}
 .statusSel{width:100%; border:1px solid var(--line-strong); border-radius:var(--r-xs); padding:4px 4px 4px 10px; font-family:inherit; font-size:12px; color:var(--ink); background:#fff; appearance:none; -webkit-appearance:none; cursor:pointer;}
 .statusSel:focus{outline:none; border-color:var(--violet-adpt);}
 
-.rowActs{position:absolute; right:5px; top:50%; transform:translateY(-50%); display:flex; gap:1px; background:#fff; padding:2px; border-radius:8px; box-shadow:var(--shadow-chip); z-index:4; opacity:.45; transition:opacity .12s;}
-.featRow:hover .rowActs{opacity:1;}
-.rowActs .iconbtn{width:22px; height:22px;}
-.rowActs .iconbtn svg{width:12px; height:12px;}
-.addFeat{display:flex; align-items:center; gap:6px; height:32px; padding:0 8px 0 calc(6px + var(--step)); color:var(--violet-adpt); font-size:12.5px; cursor:pointer; border-bottom:1px solid var(--line); background:var(--panel);}
-.addFeat:hover{background:#f5f1ff;}
+/* G2: feature-row content slide — feature rows now mirror container rows. The grip menu is an ABSOLUTE
+   anchor at the row FRONT (zero flow width, so .rowMain's cells still start at x=0 and line up with the
+   header columns — closed-state geometry is unchanged). On grip hover/focus-within, .rowMain (the whole
+   cell strip) slides right so the open pill fills the vacated space to the left and never overlays a cell,
+   with the same pointer-events:none-while-open rule as .modMain. The pill opens at the grip's right edge
+   (left:100%), so the shift = pill width (--railW) + the grip's own 16px → the shifted cells clear the pill. */
+.featRow > .gripMenu{position:absolute; left:0; top:0; bottom:0; z-index:6;}
+.rowMain{display:flex; align-items:stretch; flex:1 1 auto; min-width:0; transition:transform .2s var(--ease);}
+.featRow > .gripMenu:hover ~ .rowMain, .featRow > .gripMenu:focus-within ~ .rowMain{transform:translateX(calc(var(--railW,0px) + 16px)); pointer-events:none;}
+.addFeat{display:flex; align-items:center; gap:6px; height:32px; padding:0 8px 0 calc(6px + var(--step) * var(--lvl, 1)); color:var(--violet-adpt); font-size:12.5px; cursor:pointer; border-bottom:1px solid var(--line);
+  background-color:var(--panel);
+  background-image:
+    repeating-linear-gradient(90deg, var(--rail) 0 2px, transparent 2px var(--step)),   /* Stage-2 ancestor rail ladder */
+    linear-gradient(var(--shade), var(--shade));                                         /* Stage-2 stepped shading */
+  background-repeat:no-repeat,no-repeat;
+  background-position:var(--rail-x) 0, 0 0;
+  background-size:var(--ladderW) 100%, 100% 100%;}
+.addFeat:hover{background-color:#f5f1ff;} /* G3: colour-only, keep the ladder/shade layers */
 .addFeat svg{width:13px; height:13px;}
 
 /* ===== MODULE HIERARCHY — step indent (2.4) + sub-module tree rails (2.2.2) =====
@@ -276,17 +314,67 @@ button{font-family:inherit; cursor:pointer;}
    rows stay full-width for borders + drag hit-testing. Rails are per-row ::before/
    ::after segments (top:0 / bottom:0) so any row height works, wrapTxt included. */
 :root{ --step:24px; --rail:rgba(146,65,255,.34); --rail-x:50px; }
-/* 2.4 — indent steps: main feat = 1, sub modRow = 1, sub feat = 2 */
-.cell.feat{padding-left:calc(4px + var(--step));}                       /* was 4px — feature of a main = 1 step */
-.featRow.subScope .cell.feat{padding-left:calc(4px + 2*var(--step));}   /* feature of a sub = 2 steps */
-.addFeat.subScope{padding-left:calc(6px + 2*var(--step));}             /* sub add-zone aligns under sub features */
-.subMod .chip{margin-left:var(--step);}                                /* sub modRow content shifted 1 step (chip + name move together) */
-.subMod .modName{font-weight:500;}                                     /* lighter than a main's 700 → hierarchy reads */
-/* 2.2.2 — vertical rail on every sub row + elbow into each sub-module header */
+/* Stage-2 (§1.9 left pane): stepped indent shading --shade = rgba(146,65,255, .03 × depth), and the
+   ancestor rail-ladder width --ladderW = --step × ancestorCount. Both are pure BACKGROUND (drawn by
+   the .modRow/.featRow/.addFeat background stacks above) → zero effect on row height (R11 alignment).
+   G6a: --shade is set INLINE per row by renderGrid (shadeVar) using the exact, UNBOUNDED formula — the
+   old per-level class clamp is gone. §1.10 theme channel: shadeVar emits BOTH --shade-l (light) and
+   --shade-d (dark) inline; --shade resolves to --shade-l here and to --shade-d under [data-theme="dark"]
+   (see the dark block near the end), so pane-parity holds in both themes with no re-render on switch.
+   This default is the depth-0 (no-tint) fallback. */
+.modRow,.featRow,.addFeat{ --shade-l:transparent; --shade-d:transparent; --shade:var(--shade-l); --ladderW:0px; }
+.subMod{ --ladderW:calc(var(--step) * (var(--lvl) - 1)); }                 /* container: one pass-through rail per ancestor level */
+.featRow.subScope, .addFeat.subScope{ --ladderW:calc(var(--step) * (var(--lvl) - 2)); }
+/* v1.0.4 — PROPORTIONAL indent at ANY depth (R11): each row carries an inline --lvl = its
+   tree depth; padding lives INSIDE the row (never a margin/height change), so row heights
+   stay --modH / --rowH at every depth. depth 0/1 reproduce the v1.0.3 one/two-step values. */
+.cell.feat{padding-left:calc(4px + var(--step) * var(--lvl, 1));}       /* feature: 4px + (depth) steps */
+.subMod .chip{margin-left:calc(var(--step) * var(--lvl, 1));}          /* sub-container header: chip + name shift (depth) steps */
+.subMod .modName{font-weight:500;}                                     /* lighter than a root's 700 → hierarchy reads */
+/* 2.2.2 — own-level 2px vertical rail (::before) + elbow (::after), generalised to ANY depth by
+   shifting one --step per level; ancestor pass-through rails are the repeating-gradient ladder above. */
 .subMod, .featRow.subScope, .addFeat.subScope{position:relative;}
-.subMod::before, .featRow.subScope::before, .addFeat.subScope::before{content:""; position:absolute; left:var(--rail-x); top:0; bottom:0; width:2px; background:var(--rail); pointer-events:none;}
-.subMod::after{content:""; position:absolute; left:var(--rail-x); top:calc(50% - 1px); width:calc(var(--step) + 6px); height:2px; background:var(--rail); pointer-events:none;}
-.subEnd::before{bottom:auto; height:calc(50% + 1px);}                  /* terminate the parent rail at its last sub block's elbow */
+.subMod::before{content:""; position:absolute; left:calc(var(--rail-x) + var(--step) * (var(--lvl) - 1)); top:0; bottom:0; width:2px; background:var(--rail); pointer-events:none;}
+.featRow.subScope::before, .addFeat.subScope::before{content:""; position:absolute; left:calc(var(--rail-x) + var(--step) * (var(--lvl) - 2)); top:0; bottom:0; width:2px; background:var(--rail); pointer-events:none;}
+.subMod::after{content:""; position:absolute; left:calc(var(--rail-x) + var(--step) * (var(--lvl) - 1)); top:calc(50% - 1px); width:calc(var(--step) + 6px); height:2px; background:var(--rail); pointer-events:none;}
+.subEnd::before{bottom:auto; height:calc(50% + 1px);}                  /* terminate the own rail at its last sub block's elbow */
+
+/* ===== GRIP MENU (Stage 2, §1.1 / D7) — slide-open pill of row actions =====
+   Opens on GRIP hover / focus-within ONLY (never plain row hover). The pill is absolutely
+   positioned right of the grip and revealed via clip-path (slides open to the right) with a
+   staggered per-button fade. --railW (measured per row in JS from the real pill width) is how
+   far .modMain / the feature .txt slide right so the open pill never overlays content. */
+.gripMenu{position:relative; display:flex; align-items:center; flex:0 0 auto;}
+.gripPill{position:absolute; left:100%; top:50%; transform:translateY(-50%); display:flex; align-items:center; gap:1px;
+  padding:2px; background:#fff; border:1px solid var(--line-strong); border-radius:var(--r-pill); box-shadow:var(--shadow-chip);
+  white-space:nowrap; z-index:6; opacity:0; pointer-events:none; clip-path:inset(0 100% 0 0 round var(--r-pill));
+  transition:clip-path .22s var(--ease), opacity .16s var(--ease);}
+.gripMenu:hover > .gripPill, .gripMenu:focus-within > .gripPill{opacity:1; pointer-events:auto; clip-path:inset(0 0 0 0 round var(--r-pill));}
+.gripPill > button.gm{width:24px; height:24px; flex:0 0 auto; padding:0; border:1px solid transparent; background:transparent; color:var(--ink-soft); border-radius:7px; display:flex; align-items:center; justify-content:center; cursor:pointer; opacity:0; transition:opacity .16s var(--ease), background .12s, color .12s, border-color .12s;}
+.gripPill > button.gm svg{width:13px; height:13px;}
+.gripPill > button.gm:hover{background:var(--surface); color:var(--violet-adpt); border-color:var(--line-strong);}
+.gripPill > button.gm.danger:hover{color:var(--ruby-adpt); border-color:#f3c2cf;}
+.gripPill > button.gm:disabled{color:var(--ink-faint); cursor:not-allowed;}
+.gripPill .gsep{flex:0 0 auto; width:1px; height:15px; background:var(--line-strong); margin:0 3px;}
+/* staggered reveal (transition-delay per position; gsep sit at child 3 & 6, so buttons are 1,2,4,5,7,8,9,10) */
+.gripMenu:hover > .gripPill > button.gm, .gripMenu:focus-within > .gripPill > button.gm{opacity:1;}
+.gripMenu:hover > .gripPill > button.gm:disabled, .gripMenu:focus-within > .gripPill > button.gm:disabled{opacity:.4;}
+.gripPill > button.gm:nth-child(1){transition-delay:.02s;} .gripPill > button.gm:nth-child(2){transition-delay:.05s;}
+.gripPill > button.gm:nth-child(4){transition-delay:.08s;} .gripPill > button.gm:nth-child(5){transition-delay:.11s;}
+.gripPill > button.gm:nth-child(7){transition-delay:.14s;} .gripPill > button.gm:nth-child(8){transition-delay:.17s;}
+.gripPill > button.gm:nth-child(9){transition-delay:.20s;} .gripPill > button.gm:nth-child(10){transition-delay:.23s;}
+/* G4: Esc force-closes a HOVER-opened menu by stamping .gmSuppress on the .gripMenu — these override
+   the :hover-open rules (extra class ⇒ higher/equal-and-later specificity) so the pill stays shut and
+   the content stays put even while the pointer remains on the grip. JS clears the class on pointerleave
+   (one-shot), so moving away and re-hovering opens it again. The focus-within/blur path is untouched. */
+.gripMenu.gmSuppress:hover > .gripPill{opacity:0; pointer-events:none; clip-path:inset(0 100% 0 0 round var(--r-pill));}
+.gripMenu.gmSuppress:hover > .gripPill > button.gm{opacity:0;}
+.gripMenu.gmSuppress:hover ~ .modMain, .featRow > .gripMenu.gmSuppress:hover ~ .rowMain{transform:none; pointer-events:auto;}
+
+/* R6 reveal-and-flash: a transient violet pulse on the moved/created row in BOTH panes (~1.2s),
+   removed on animationend. Uses an inset box-shadow flood so it reads over any row background. */
+@keyframes flashPulse{ 0%{box-shadow:inset 0 0 0 200px rgba(146,65,255,.28);} 100%{box-shadow:inset 0 0 0 200px rgba(146,65,255,0);} }
+.flashRow{animation:flashPulse 1.2s var(--ease);}
 
 /* timeline */
 #axis{position:relative; min-width:max-content;}
@@ -304,9 +392,25 @@ button{font-family:inherit; cursor:pointer;}
 #todayLine{position:absolute; top:0; bottom:0; width:2px; background:var(--today); z-index:7; pointer-events:none;}
 #todayFlag{position:absolute; top:0; transform:translateX(-50%); background:var(--today); color:#fff; font-family:var(--mono); font-size:9.5px; font-weight:600; padding:2px 7px; border-radius:0 0 8px 8px; white-space:nowrap; letter-spacing:.04em;}
 #rowsLayer{position:relative; z-index:1;}
-.barRow{position:relative; height:var(--rowH); border-bottom:1px solid var(--line);}
-.barRow.alt{background:rgba(20,22,30,.012);}
-.modBarRow{position:relative; height:var(--modH); border-bottom:1px solid var(--line-strong); background:linear-gradient(180deg,rgba(251,250,255,.6),rgba(244,242,251,.6));}
+/* §1.6 RIGHT-pane stepped shading — the frame-sync guarantee made visible. Each chart row carries the
+   SAME inline --shade as its left twin (renderTimeline sets it via shadeVar(depth), identical to renderGrid).
+   Painted as a background-IMAGE layer so it coexists with the alt-row stripe (background-COLOR below), the
+   weekend bands + grid lines in #gridLayer beneath, and is never wiped by a `background:` shorthand (the
+   Stage-2 G3 landmine). Bars/modBars are absolutely-positioned children → the shade always sits under them.
+   depth 0 ⇒ --shade transparent (falls back to the default) so the gridLayer shows through unchanged.
+   §1.10 theme channel: like the left pane, --shade resolves to --shade-l here / --shade-d under dark. */
+.modBarRow,.barRow{ --shade-l:transparent; --shade-d:transparent; --shade:var(--shade-l); }
+.barRow{position:relative; height:var(--rowH); border-bottom:1px solid var(--line);
+  background-color:transparent;
+  background-image:linear-gradient(var(--shade),var(--shade));
+  background-repeat:no-repeat;}
+.barRow.alt{background-color:rgba(20,22,30,.012);}   /* G3: colour-only (was a `background:` shorthand) so the --shade image layer survives */
+.modBarRow{position:relative; height:var(--modH); border-bottom:1px solid var(--line-strong);
+  background-color:transparent;
+  background-image:
+    linear-gradient(var(--shade),var(--shade)),                                          /* stepped shade (over) */
+    linear-gradient(180deg,rgba(251,250,255,.6),rgba(244,242,251,.6));                    /* base module gradient (under) */
+  background-repeat:no-repeat,no-repeat;}
 .bar{position:absolute; top:7px; height:calc(var(--rowH) - 16px); border-radius:8px; display:flex; align-items:center; padding:0 9px; cursor:grab; user-select:none; touch-action:none; box-shadow:var(--shadow-bar); border:1px solid rgba(0,0,0,.08); overflow:hidden; transition:box-shadow .12s;}
 .bar:hover{box-shadow:0 2px 8px rgba(20,24,40,.22); z-index:4;}
 .bar.dragging{cursor:grabbing; box-shadow:0 6px 18px rgba(20,24,40,.3); z-index:8; transition:none;}
@@ -399,7 +503,7 @@ button{font-family:inherit; cursor:pointer;}
 /* print: hide chrome */
 @media print{
   body,#app,#proj{height:auto; overflow:visible;}
-  #topbar,#summaryPanel,.rowActs,.modActs,.grip,.modGrip,.handle,.addFeat,#splitter{display:none !important;}
+  #topbar,#summaryPanel,.gripMenu,.handle,.addFeat,#splitter{display:none !important;}
   #board{overflow:visible; display:block;}
   #leftScroll,#rightScroll{overflow:visible;}
 }
@@ -461,3 +565,152 @@ button{font-family:inherit; cursor:pointer;}
 .kc-x .pmDel{width:22px; height:22px; border:1px solid transparent; background:transparent; border-radius:7px; display:flex; align-items:center; justify-content:center; color:var(--ink-faint); cursor:pointer;}
 .kc-x .pmDel:hover{color:var(--ruby-adpt); border-color:#f3c2cf;}
 @media (max-width:680px){ .kpiHead{display:none;} }
+
+/* ============================================================================
+   DARK THEME (v1.0.4 §1.10) — behind html[data-theme="dark"] (set by app.js from ui.theme).
+   Light stays byte-identical: every rule below is an ADDITIVE override, prefixed with
+   html[data-theme="dark"] so it always out-specifies its light counterpart, and the WHOLE
+   section sits inside @media screen — so PRINT never matches these selectors and reverts to
+   the :root light tokens (item 7: exports/print force light; the PNG path ALSO forces light in JS
+   for html2canvas, which renders in screen media). PALETTE chips/bars + STATUS colours are left
+   as-is (verified legible on both grounds). Contrast (WCAG, computed): ink/surface 15.6, ink/panel
+   14.5, ink-soft/panel 8.2, ink-faint/panel 5.4, worst bar ink-on-fill 7.96, status dots ≥5.3,
+   primary #a970ff/panel 5.3 — all ≥ target.
+   ============================================================================ */
+@media screen{
+  /* ---- token set: the dark ground (prototype §1.10) ---- */
+  html[data-theme="dark"]{
+    color-scheme:dark;                                  /* native form controls, scrollbars, date pickers render dark + legible */
+    --ink:#eceaf3; --ink-soft:#b4b0c2; --ink-faint:#918da0;
+    --surface:#131218; --panel:#1b1a22;
+    --line:#2b2934; --line-strong:#3a3747;
+    --weekend:rgba(255,255,255,.04);
+    --primary:#a970ff; --primary-ink:#c7a3ff; --primary-soft:rgba(169,112,255,.20);
+    --today:#ff4a7b; --today-soft:rgba(255,74,123,.18);
+    --good:#3ef2b1;
+    --violet-adpt:#a970ff;                              /* accent brightened for the dark ground (drop marks, focus rings, hovers, eyebrow) */
+    --smoke-adpt:#201e27;
+    --rail:rgba(169,112,255,.45);
+    /* elevation deepened */
+    --shadow-chip:0 6px 16px rgba(0,0,0,.55);
+    --shadow:0 14px 34px rgba(0,0,0,.5);
+    --shadow-hover:0 24px 48px rgba(0,0,0,.62);
+    --shadow-bar:0 1px 0 rgba(255,255,255,.05) inset, 0 2px 5px rgba(0,0,0,.55);
+    /* control-surface tokens — dark counterparts of the light #fff / #f4f4f8 hardcodes */
+    --ctl:#242231; --ctl-hi:#2e2b3c;
+    --mod-grad-a:#232030; --mod-grad-b:#1d1b26;         /* module-band base gradient (modRow / modBarRow) */
+  }
+
+  /* ---- §1.6/§1.9 stepped shade — swap the resolved channel to the dark formula (parity holds both panes) ---- */
+  html[data-theme="dark"] .modRow, html[data-theme="dark"] .featRow, html[data-theme="dark"] .addFeat,
+  html[data-theme="dark"] .modBarRow, html[data-theme="dark"] .barRow{ --shade:var(--shade-d); }
+
+  /* ---- control / input surfaces (light background:#fff → --ctl) ---- */
+  html[data-theme="dark"] #sumText,
+  html[data-theme="dark"] .sumDateWrap input[type=date],
+  html[data-theme="dark"] .statusSel,
+  html[data-theme="dark"] .cell input[type=date]:hover,
+  html[data-theme="dark"] .cell input[type=date]:focus,
+  html[data-theme="dark"] .cell .txt:focus,
+  html[data-theme="dark"] .field input[type=text],
+  html[data-theme="dark"] .field input[type=date],
+  html[data-theme="dark"] .field textarea,
+  html[data-theme="dark"] .field select,
+  html[data-theme="dark"] .mpList,
+  html[data-theme="dark"] .histItem input[type=date],
+  html[data-theme="dark"] .histItem textarea,
+  html[data-theme="dark"] .kpiNum,
+  html[data-theme="dark"] .kc-detail .kpiText, html[data-theme="dark"] .kc-remark .kpiText,
+  html[data-theme="dark"] .kpiSel,
+  html[data-theme="dark"] .btn,
+  html[data-theme="dark"] .seg,
+  html[data-theme="dark"] .tabBtn,
+  html[data-theme="dark"] .ph-chip,
+  html[data-theme="dark"] .colHead .colTool,
+  html[data-theme="dark"] .btn.danger,
+  html[data-theme="dark"] .btn.details.gray{ background:var(--ctl); }
+
+  /* native date pickers / selects → dark (the light rules force color-scheme:light) */
+  html[data-theme="dark"] .sumDateWrap input[type=date],
+  html[data-theme="dark"] .cell input[type=date],
+  html[data-theme="dark"] .field input[type=date],
+  html[data-theme="dark"] .field select,
+  html[data-theme="dark"] .histItem input[type=date],
+  html[data-theme="dark"] .statusSel,
+  html[data-theme="dark"] .kpiSel{ color-scheme:dark; }
+
+  /* ---- elevated surfaces: popovers, ghosts, hover elevation (--ctl-hi) ---- */
+  html[data-theme="dark"] .gripPill,
+  html[data-theme="dark"] .rowGhost,
+  html[data-theme="dark"] .progGhost,
+  html[data-theme="dark"] .iconbtn:hover,
+  html[data-theme="dark"] .btn.details.gray:hover{ background:var(--ctl-hi); }
+  html[data-theme="dark"] .modGhost{ background:linear-gradient(180deg, var(--mod-grad-a), var(--mod-grad-b)); }
+
+  /* ---- the DS “black” hover states invert on dark (black is invisible on a dark ground) ---- */
+  html[data-theme="dark"] .btn:hover{ background:var(--ctl-hi); border-color:var(--ink); color:var(--ink); }
+  html[data-theme="dark"] .btn.primary:hover{ background:var(--ink); color:var(--surface); border-color:var(--ink); }
+  html[data-theme="dark"] .seg button:hover{ color:var(--ink); }
+  html[data-theme="dark"] .tabBtn:hover{ color:var(--ink); border-color:var(--ink); }
+  /* (active seg/tab stay #000 + bright green — reads as recessed-selected against the lighter --ctl pills) */
+
+  /* ---- focus rings: light uses black + a black-alpha ring → primary violet on dark ---- */
+  html[data-theme="dark"] #sumText:focus,
+  html[data-theme="dark"] .field input:focus, html[data-theme="dark"] .field textarea:focus,
+  html[data-theme="dark"] .histItem textarea:focus{ border-color:var(--primary); box-shadow:0 0 0 2px var(--primary-soft); }
+  html[data-theme="dark"] .kpiNum:focus, html[data-theme="dark"] .kpiText:focus, html[data-theme="dark"] .kpiSel:focus{ box-shadow:0 0 0 2px rgba(169,112,255,.30); }
+
+  /* ---- hover / drop-mark tints — background-COLOR only (keep the rail-ladder + shade image layers) ---- */
+  html[data-theme="dark"] .progRow:hover,
+  html[data-theme="dark"] .kpiRow.progRow:hover{ background:rgba(169,112,255,.09); }
+  html[data-theme="dark"] .featRow:hover{ background-color:rgba(169,112,255,.055); }
+  html[data-theme="dark"] .addFeat:hover{ background-color:rgba(169,112,255,.07); }
+  html[data-theme="dark"] .addFeat.dropInto{ background-color:rgba(169,112,255,.16); }
+  html[data-theme="dark"] .modRow.modDropBefore, html[data-theme="dark"] .modRow.modDropAfter{ background-color:rgba(169,112,255,.16); }
+  html[data-theme="dark"] .featRow.dropBefore, html[data-theme="dark"] .featRow.dropAfter{ background-color:rgba(169,112,255,.14); }
+  html[data-theme="dark"] .barRow.alt{ background-color:rgba(255,255,255,.022); }   /* was rgba(20,22,30,.012): dark-on-light → light-on-dark */
+
+  /* ---- module-band base gradients (re-declare the image stack to swap ONLY the base layer; --rail/--shade adapt via tokens) ---- */
+  html[data-theme="dark"] .modRow{
+    background-image:
+      repeating-linear-gradient(90deg, var(--rail) 0 2px, transparent 2px var(--step)),
+      linear-gradient(var(--shade), var(--shade)),
+      linear-gradient(180deg, var(--mod-grad-a), var(--mod-grad-b));
+  }
+  html[data-theme="dark"] .modBarRow{
+    background-image:
+      linear-gradient(var(--shade), var(--shade)),
+      linear-gradient(180deg, rgba(35,32,48,.66), rgba(29,27,38,.66));   /* translucent so grid lines + today-line show through */
+  }
+  html[data-theme="dark"] .monthBand{ background:linear-gradient(180deg, #211f2b, #191822); }
+
+  /* ---- progress track (light greys → dark) ---- */
+  html[data-theme="dark"] .pbar{ background:#2b2934; }
+  html[data-theme="dark"] .sw.track{ background:#3a3747; }
+
+  /* ---- KPI state badges: pale tag bg → translucent tinted dark + a light-tint text (keep the semantics) ---- */
+  html[data-theme="dark"] .kpiBadge.k-none{ background:rgba(255,255,255,.07); color:var(--ink-soft); }
+  html[data-theme="dark"] .kpiBadge.k-ontrack{ background:rgba(0,206,131,.16); color:#5ce9b4; }
+  html[data-theme="dark"] .kpiBadge.k-delay{ background:rgba(255,171,64,.16); color:#ffca86; }
+  html[data-theme="dark"] .kpiBadge.k-block{ background:rgba(255,74,123,.18); color:#ff9db4; }
+  html[data-theme="dark"] .kpiBadge.k-done{ background:rgba(79,152,255,.18); color:#a7c8ff; }
+
+  /* ---- danger affordances: the light pale-red hovers (#c0392b/#f3dada/#e9c4bf/#f3c2cf/#fff0f4) → dark-coherent translucent red + bright ruby ---- */
+  html[data-theme="dark"] .iconbtn.danger:hover{ background:rgba(255,74,123,.14); color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); }
+  html[data-theme="dark"] .colHead .delcol:hover{ background:rgba(255,74,123,.18); color:#ff9db4; }
+  html[data-theme="dark"] .btn.danger:hover{ background:rgba(255,74,123,.14); }
+  /* the two sibling #f3c2cf danger hovers (grip-menu delete pill + KPI-table row delete) — same idiom as .iconbtn.danger:hover */
+  html[data-theme="dark"] .gripPill > button.gm.danger:hover{ background:rgba(255,74,123,.14); color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); }
+  html[data-theme="dark"] .kc-x .pmDel:hover{ background:rgba(255,74,123,.14); color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); }
+
+  /* ---- bar chrome on dark: light-tint the drag-handle nub + drop the white label halo ---- */
+  html[data-theme="dark"] .bar .blabel{ text-shadow:0 1px 2px rgba(0,0,0,.5); }
+  html[data-theme="dark"] .handle:after{ background:rgba(255,255,255,.4); }
+
+  /* ---- column-resize affordance brightened ---- */
+  html[data-theme="dark"] .colHead .colResize:hover{ background:linear-gradient(90deg,transparent,rgba(169,112,255,.35)); }
+  html[data-theme="dark"] .colHead .colResize.dragging{ background:linear-gradient(90deg,transparent,rgba(169,112,255,.6)); }
+
+  /* ---- dashboard card foot ---- */
+  html[data-theme="dark"] .card .foot{ background:var(--surface); }
+}

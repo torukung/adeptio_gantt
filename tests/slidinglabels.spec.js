@@ -14,22 +14,39 @@
  * wide bar's END can be scrolled to the viewport-left edge (needed for the clamp case). */
 const { test, expect, openTimeline, mkDoc, mkMod, mkFeat, assertAligned } = require("./fixtures");
 
-// data-fi order = features[] order: 0 = wide slider, 1 = tiny (truncating) bar, 2 = spacer.
+// feature order = children order: f-slide = wide slider, f-tiny = tiny (truncating) bar, f-spacer = spacer.
 function SEED_SLIDE() {
   return mkDoc([
     mkMod("m-wide", "Wide Module", {
       color: 0,
       features: [
         mkFeat("f-slide", "Slide Label", "2026-02-10", "2026-03-10"),        // ~317px bar, ~label fits → slides
-        mkFeat("f-tiny", "Small Bar Overflow Name", "2026-01-15", "2026-01-15"), // 1-day bar → label truncates
+        mkFeat("f-tiny", "Small Bar Overflow Name", "2026-01-15", "2026-01-15"), // 1-day bar (<34px) → label hidden (status dot only)
         mkFeat("f-spacer", "Spacer", "2026-11-01", "2026-12-20"),            // far right → extends the range
       ],
     }),
   ]);
 }
 
-const WIDE = '.bar[data-mi="0"][data-fi="0"]';
-const TINY = '.bar[data-mi="0"][data-fi="1"]';
+// v1.0.4: bars are addressed by data-nid (feature node id). SEED_SLIDE feature ids: f-slide, f-tiny.
+const WIDE = '.bar[data-nid="f-slide"]';
+const TINY = '.bar[data-nid="f-tiny"]';
+
+// H4e — a bar that is WIDE ENOUGH to show its label (≥34px, font ≥7.5 at week zoom) but still much
+// NARROWER than its (very long) name → the label renders truncated with an ellipsis (the labelNeedsTip
+// truncation branch), distinct from the sub-34px HIDE case. f-mid: a ~7-day bar @11px/day ≈ 75px wide.
+const MID = '.bar[data-nid="f-mid"]';
+function SEED_ELLIPSIS() {
+  return mkDoc([
+    mkMod("m-ell", "Ellipsis Module", {
+      color: 0,
+      features: [
+        mkFeat("f-mid", "This Is A Deliberately Long Feature Name That Cannot Fit", "2026-02-10", "2026-02-16"), // ≥34px bar, name far wider → ellipsis
+        mkFeat("f-far", "Spacer", "2026-11-01", "2026-12-20"),                                                    // extends range so the chart is scrollable
+      ],
+    }),
+  ]);
+}
 
 // Set #rightScroll.scrollLeft, fire the real onscroll hook, and let the rAF-throttled
 // updateStickyLabels() settle (double-rAF). Returns the scrollLeft the browser accepted.
@@ -144,14 +161,14 @@ test.describe("sliding sticky Gantt labels", () => {
     await openTimeline(page, SEED_SLIDE());
     await scrollChart(page, 0); // openTimeline auto-centers on "today"; bring the early tiny bar into view
 
-    // The 1-day bar is far narrower than its name → the label is ellipsis-truncated
-    // regardless of scroll, and hovering it shows the full name in the floatTip.
-    const truncated = await page.evaluate((sel) => {
+    // v1.0.4 §1.9: a sub-34px bar HIDES its label entirely (status dot only) rather than truncating it.
+    // The hidden label still qualifies for the hover bubble, which shows the full name.
+    const tiny = await page.evaluate((sel) => {
       const lbl = document.querySelector(sel).querySelector(".blabel");
-      return { clipped: (lbl.scrollWidth - lbl.clientWidth) > 1, needsTip: window["labelNeedsTip"](lbl) };
+      return { hidden: lbl.style.display === "none", needsTip: window["labelNeedsTip"](lbl) };
     }, TINY);
-    expect(truncated.clipped, "the tiny bar's label must be truncated").toBe(true);
-    expect(truncated.needsTip, "labelNeedsTip true for the small bar (unchanged behavior)").toBe(true);
+    expect(tiny.hidden, "v1.0.4: the sub-34px bar hides its label (status dot only)").toBe(true);
+    expect(tiny.needsTip, "labelNeedsTip true for the hidden small-bar label → hover bubble").toBe(true);
 
     const pt = await page.evaluate((sel) => {
       const rect = document.querySelector(sel).getBoundingClientRect();
@@ -162,6 +179,38 @@ test.describe("sliding sticky Gantt labels", () => {
     const tip = page.locator(".floatTip");
     await expect(tip).toBeVisible();
     await expect(tip).toHaveText("Small Bar Overflow Name");
+  });
+
+  test("ellipsis branch: a ≥34px bar narrower than its label → truncated (ellipsis) + hover bubble (H4e)", async ({ page }) => {
+    await openTimeline(page, SEED_ELLIPSIS());
+    await scrollChart(page, 0); // openTimeline auto-centers on today; bring the early (Feb) bar into view
+
+    const st = await page.evaluate((sel) => {
+      const bar = document.querySelector(sel), lbl = bar.querySelector(".blabel");
+      return {
+        barW: parseFloat(bar.style.width) || 0,
+        fontPx: parseFloat(getComputedStyle(lbl).fontSize),
+        hidden: lbl.style.display === "none",
+        truncated: lbl.scrollWidth - lbl.clientWidth > 1,   // overflowing its own box → CSS text-overflow:ellipsis
+        needsTip: window["labelNeedsTip"](lbl),             // must engage via the truncation branch
+      };
+    }, MID);
+    expect(st.barW, "bar is wide enough to show a label (≥34px, not the hide regime)").toBeGreaterThanOrEqual(34);
+    expect(st.fontPx, "label font is ≥7.5px (visible, not hidden)").toBeGreaterThanOrEqual(7.5);
+    expect(st.hidden, "label is rendered, not display:none").toBe(false);
+    expect(st.truncated, "label text overflows the bar → ellipsis (scrollWidth > clientWidth)").toBe(true);
+    expect(st.needsTip, "labelNeedsTip true via the truncation branch").toBe(true);
+
+    // Hover the bar → floatTip shows the FULL untruncated name.
+    const pt = await page.evaluate((sel) => {
+      const r = document.querySelector(sel).getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }, MID);
+    await page.mouse.move(pt.x, pt.y);
+
+    const tip = page.locator(".floatTip");
+    await expect(tip).toBeVisible();
+    await expect(tip).toHaveText("This Is A Deliberately Long Feature Name That Cannot Fit");
   });
 
   test("left/right pane vertical alignment still holds after a horizontal scroll", async ({ page }) => {

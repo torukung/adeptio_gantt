@@ -1,0 +1,3 @@
+.DS_Store
+# Real client data used by the migration test — NEVER commit (repo is public).
+tests/data/
