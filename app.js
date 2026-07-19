@@ -49,6 +49,18 @@ function daysBetween(a,b){ return Math.round((parse(b)-parse(a))/DAY); }
 function startOfMonth(d){ return new Date(d.getFullYear(),d.getMonth(),1); }
 function endOfMonth(d){ return new Date(d.getFullYear(),d.getMonth()+1,0); }
 function today(){ const t=new Date(); return new Date(t.getFullYear(),t.getMonth(),t.getDate()); }
+function nowIso(){ return new Date().toISOString(); }  // v1.0.5 F1: full datetime for last-edit stamps
+/* v1.0.5 F1: render a last-edit stamp. Tolerates BOTH shapes in stored docs — legacy date-only
+   "YYYY-MM-DD" (v1.0.4 and earlier wrote these; a stale tab may still write one during the LWW
+   window) renders date-only; full ISO renders "DD/MM/YYYY HH:mm" in LOCAL time (spec §3, N3). */
+function fmtStamp(s){
+  if(!s) return "";
+  const str=String(s);
+  if(/^\d{4}-\d{2}-\d{2}$/.test(str)){ const p=str.split("-"); return p[2]+"/"+p[1]+"/"+p[0]; }
+  const d=new Date(str); if(isNaN(d)) return "";
+  const p2=n=>String(n).padStart(2,"0");
+  return p2(d.getDate())+"/"+p2(d.getMonth()+1)+"/"+d.getFullYear()+" "+p2(d.getHours())+":"+p2(d.getMinutes());
+}
 const LS_UI = "adeptio_ptrack_ui";
 /* v1.0.4 §1.8 / R12 — continuous Gantt zoom: px-per-day (PPD) ∈ [0.9,34], persisted per-device in
    `ui` (LS_UI), NEVER in the doc. The three legacy day/week/month presets survive only as shortcuts
@@ -145,6 +157,7 @@ const IC = {
   indent:  ic('<path d="M4 6h16M4 12h9M4 18h16"/><path d="M15 8.5l3.5 3.5-3.5 3.5"/>'),   // ⇥ tuck under previous sibling (Indent)
   outdent: ic('<path d="M4 6h16M11 12h9M4 18h16"/><path d="M8.5 8.5L5 12l3.5 3.5"/>'),   // ⇤ lift to grandparent level (Outdent)
   promote: ic('<path d="M8 8l4-4 4 4M8 16l4 4 4-4"/>'),                                   // ⇄ convert Feature ⇆ Module (promote/demote)
+  note:  ic('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>'),  // v1.0.5 F2: โน้ตโครงการ
 };
 
 /* =====================  STORE (local-first, optional cloud sync)  ===== */
@@ -174,9 +187,26 @@ const Store = {
     migrateDB(DB);                                    // v1.0.4: flat modules+parentId → recursive node tree (idempotent, per project)
     MEM = DB; return DB;
   },
-  save(){ writeMirror(DB); const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); } // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
+  save(){
+    /* v1.0.5 F1 (N2): the ONE stamping point — every doc mutation funnels through here, so
+       "any information edit/change" gets a last-edit datetime with zero per-call-site edits.
+       PID is null on the dashboard (route() clears it), so an open project is never mis-stamped
+       by dashboard-level saves; the project modal stamps its own target explicitly. */
+    DB.updatedAt = nowIso();
+    const P0 = PID ? proj() : null; if(P0) P0.updatedAt = nowIso();
+    const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
+    refreshStamps();
+  }
 };
 function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
+/* v1.0.5 F1: LIGHT stamp refresh — updates the Project Status header stamp in place after a save
+   (blur-saves and autosaves don't re-render, so the element must be touched directly). Never a
+   re-render: typing mid-edit must not lose focus/selection. */
+function refreshStamps(){
+  const s=el("statusStamp"); if(!s) return;
+  const P = PID ? proj() : null;
+  if(P && P.updatedAt) s.textContent = "แก้ไขล่าสุด " + fmtStamp(P.updatedAt);
+}
 
 /* ---- cloud sync engine: local-first; the Worker's `rev` is the tiebreaker ---- */
 let pushTimer=null, pushPending=false, pushFails=0;
@@ -227,9 +257,10 @@ function editingNow(){
   if(a && (a.tagName==="TEXTAREA" || a.tagName==="INPUT" || a.isContentEditable)) return true;
   if(el("modalRoot") && el("modalRoot").style.display==="block") return true;
   if(el("historyOverlay") && el("historyOverlay").style.display==="flex") return true;
+  if(notesOpen()) return true;                 // v1.0.5 F2 (N5): never adopt a remote doc / re-render while the notes popup is open
   return false;
 }
-function adoptRemote(doc, rev){ DB=doc; migrateDB(DB); MEM=DB; writeMirror(DB); safeSet(JSON.stringify(DB)); setLsRev(rev); route(); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent)
+function adoptRemote(doc, rev){ DB=doc; migrateDB(DB); MEM=DB; safeSet(JSON.stringify(DB)); setLsRev(rev); route(); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent)
 async function cloudPull(force){
   if(!cloudOn()) return false;
   try{
@@ -408,7 +439,7 @@ function openProjectWindow(id){
 }
 function route(){
   const {pid, view} = readRoute();
-  closeModal(); hideHistory();
+  closeModal(); hideHistory(); notesHardClose();     // v1.0.5 F2 audit fix: flush+close notes BEFORE PID changes (see notesHardClose)
   if(pid && DB.projects.some(p=>p.id===pid)){
     PID = pid; renderProject();
     if(view==="history") showHistory();
@@ -435,6 +466,7 @@ function renderDashboard(){
         <h3>${esc(p.name)}</h3>
         <div class="stat"><span><b>${p.modules.length}</b> โมดูล</span><span><b>${nFeat}</b> ฟีเจอร์</span><span class="mono">${range}</span></div>
         ${cur ? `<div class="sumline"><div class="sumdate mono">อัปเดต ${esc(cur.date)}</div>${esc((cur.text||"").slice(0,150))}</div>` : ""}
+        ${p.updatedAt ? `<div class="lastEdit mono">แก้ไขล่าสุด ${esc(fmtStamp(p.updatedAt))}</div>` : ""}
       </div>
       <div class="cardProg">
         <div class="cp-top"><span class="cp-lab">ความคืบหน้า</span><span class="grow"></span><span class="cp-pct mono">เสร็จ ${agg.donePct}% · ทำอยู่ ${agg.startedPct}%</span></div>
@@ -486,6 +518,7 @@ function renderDashboard(){
     e.stopPropagation();
     const p=DB.projects.find(x=>x.id===b.dataset.id);
     if(confirm(`ลบโครงการ “${p.name}” ทั้งหมด? การลบไม่สามารถย้อนกลับได้`)){
+      if(DB.notes) delete DB.notes[b.dataset.id];  // v1.0.5 F2: prune the project's notes in the same mutation
       DB.projects = DB.projects.filter(x=>x.id!==b.dataset.id); Store.save(); renderDashboard(); toast("ลบโครงการแล้ว");
     }
   });
@@ -506,11 +539,11 @@ function projectModal(id){
   el("modalRoot").querySelectorAll('#pm_sw .swatch').forEach(s=> s.onclick=()=>{ color=+s.dataset.c; el("modalRoot").querySelectorAll('#pm_sw .swatch').forEach(x=>x.classList.toggle('on',x===s)); });
   el("pm_save").onclick = ()=>{
     const name=el("pm_name").value.trim()||"โครงการใหม่", client=el("pm_client").value.trim(), code=el("pm_code").value.trim();
-    if(editing){ editing.name=name; editing.client=client; editing.code=code; editing.color=color; editing.updatedAt=iso(today()); }
+    if(editing){ editing.name=name; editing.client=client; editing.code=code; editing.color=color; editing.updatedAt=nowIso(); } // v1.0.5 F1: PID is null on the dashboard, so this modal stamps its own target
     else {
       const slug=(code||name).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")||("proj-"+_seq);
       let pid=slug, n=2; while(DB.projects.some(p=>p.id===pid)){ pid=slug+"-"+n; n++; }
-      DB.projects.push({ id:pid, name, client, code, color, createdAt:iso(today()), updatedAt:iso(today()),
+      DB.projects.push({ id:pid, name, client, code, color, createdAt:iso(today()), updatedAt:nowIso(),
         customCols:[], progressOrder:[], summary:{current:{id:nid(),date:iso(today()),text:""},history:[]}, modules:[], docVer:2 }); // v1.0.4: new projects are already tree-shaped
     }
     Store.save(); closeModal(); renderDashboard(); toast(editing?"บันทึกแล้ว":"สร้างโครงการแล้ว");
@@ -686,8 +719,10 @@ function renderSummary(){
         <span class="lab">สรุปสถานะโครงการ</span>
         <span class="grow"></span>
         <span class="sumDateWrap">วันที่อัปเดต <input type="date" id="sumDate" value="${esc(cur.date||iso(today()))}"/></span>
+        <button class="btn sm" id="sumNotes" title="โน้ตโครงการ (ธุรกิจ / เทคนิค)">${IC.note}<span>โน้ต<span id="sumNotesBadge"${notesCount(P.id)?"":' style="display:none"'}> (<span id="sumNotesCount">${notesCount(P.id)}</span>)</span></span></button>
         <button class="btn sm" id="goTimeline" title="ไปหน้าไทม์ไลน์และ Gantt">ไทม์ไลน์โครงการ ${IC.arrow}</button>
       </div>
+      <div class="sumStamp mono" id="statusStamp">${P.updatedAt ? "แก้ไขล่าสุด "+esc(fmtStamp(P.updatedAt)) : ""}</div>
       <textarea id="sumText" maxlength="1000" placeholder="พิมพ์สรุปสถานะล่าสุด (สูงสุด 1,000 ตัวอักษร)…">${esc(cur.text||"")}</textarea>
       <div class="sumMeta">
         <span class="counter" id="sumCount"></span>
@@ -702,7 +737,7 @@ function renderSummary(){
   const upd=()=>{ ctr.textContent=ta.value.length+" / 1000"; ctr.classList.toggle('warn', ta.value.length>=950); };
   upd(); ta.oninput=upd;
   ta.onblur = ()=>{ if(cur.text!==ta.value){ cur.text=ta.value; Store.save(); } }; // FIX: persist unsaved summary text on blur (no toast) so navigation never drops it
-  el("sumSave").onclick = ()=>{ cur.text=ta.value; cur.date=el("sumDate").value||cur.date; P.updatedAt=iso(today()); Store.save(); toast("บันทึกสรุปแล้ว"); };
+  el("sumSave").onclick = ()=>{ cur.text=ta.value; cur.date=el("sumDate").value||cur.date; Store.save(); toast("บันทึกสรุปแล้ว"); }; // v1.0.5 F1: manual date-only stamp dropped — Store.save() stamps centrally
   el("sumDate").onchange = ()=>{ cur.date=el("sumDate").value; Store.save(); };
   el("sumNew").onclick = ()=>{
     cur.text=ta.value; cur.date=el("sumDate").value||cur.date;
@@ -712,6 +747,7 @@ function renderSummary(){
   };
   el("sumHist").onclick = ()=>{ if(cur.text!==ta.value){ cur.text=ta.value; Store.save(); } location.hash="project="+PID+"&view=history"; }; // FIX: save current summary text before hash-nav to the history overlay
   const gt=el("goTimeline"); if(gt) gt.onclick=()=> switchTab("timeline");
+  const nb=el("sumNotes"); if(nb) nb.onclick=()=>{ if(cur.text!==ta.value){ cur.text=ta.value; Store.save(); } openNotes(); }; // v1.0.5 F2: persist in-flight summary text before opening the popup
   renderProgress();
 }
 
@@ -914,7 +950,11 @@ function updateMeta(){
    both panes render from a single flatten(P) (R9). */
 
 /* ---- MIGRATION (R-spec §2): v1 flat modules → recursive tree. Idempotent, one place. ---- */
-function migrateDB(DB){ if(DB && Array.isArray(DB.projects)) DB.projects.forEach(migrateDoc); return DB; }
+function migrateDB(DB){
+  if(DB && typeof DB==="object" && (!DB.notes || typeof DB.notes!=="object" || Array.isArray(DB.notes))) DB.notes={}; // v1.0.5 F2: additive, idempotent, NO docVer bump (spec §4.7)
+  if(DB && Array.isArray(DB.projects)) DB.projects.forEach(migrateDoc);
+  return DB;
+}
 function v1FeatureToNode(f){
   // Keep the existing (uid-minted) unique feature id as the node id; keep ALL unknown fields.
   const n = Object.assign({}, f);
@@ -1020,19 +1060,10 @@ function normalizeTree(P){
   return P;
 }
 
-/* ---- DUAL-WRITE MIRROR (spec §2.2 — REMOVE IN v1.0.5) --------------------------------
-   On save, every container also writes `features:[its DIRECT feature children]`. It is a
-   MIRROR only — ignored on load when docVer>=2 (we render from children). It lets a still-
-   open v1.0.3 tab that adopts a v2 doc render top-level modules + their direct features
-   instead of a blank board, while its own saves keep `children` intact (v1.0.3 preserves
-   unknown fields). Delete this whole helper + its Store.save()/adoptRemote() calls in v1.0.5. */
-function writeMirror(DB){
-  if(!DB || !Array.isArray(DB.projects)) return;
-  DB.projects.forEach(P=>{
-    if(!P || !Array.isArray(P.modules)) return;
-    (function rec(nodes){ nodes.forEach(n=>{ if(n && n.kind==="container"){ n.features=(n.children||[]).filter(c=>c && c.kind==="feature"); rec(n.children||[]); } }); })(P.modules);
-  });
-}
+/* v1.0.5 F0: the v1.0.4 dual-write `features[]` mirror is GONE (it existed only so a still-open
+   v1.0.3 tab could render a v2 doc during the transition). Stale `features` keys already stored
+   in docs stay inert — the load path ignores them under docVer>=2 and the migration lift still
+   consumes v1-shape docs restored from old backups (spec v1.0.5 §2, N1). */
 
 /* ---- TREE WALK / ADDRESSING (R1) ---- */
 function walkTree(nodes, fn, parent){ (nodes||[]).forEach((n,i)=>{ fn(n,parent||null,i); if(n && n.kind==="container") walkTree(n.children||[], fn, n); }); }
@@ -2252,6 +2283,320 @@ async function backupModal(){
   }
 }
 
+/* =====================  PROJECT NOTES (v1.0.5 F2) =====================
+   Storage (spec §4.7): DB.notes[pid] = { business:[{date,html}], technical:[{date,html}], log:[{ts,action,col,date}] }
+   — a SEPARATE top-level doc section (never inside projects[]), so every D1 snapshot backs it up.
+   DOM CONTRACT between this core and renderNotesBody() (UI):
+   - each column panel:   .noteCol[data-col="business"|"technical"]  (exactly one .active at a time)
+   - each day's editor:   .noteEdit[contenteditable][data-col][data-date="YYYY-MM-DD"] (+ data-today="1" on the lazy today region)
+   - each divider:        .dateDiv[data-date] holding .dateChip + .binBtn
+   The engine below owns persistence; the UI owns rendering + toolbars + bin/popover/highlight. */
+const NOTE_TAGS = new Set(["B","STRONG","I","EM","SPAN","DIV","P","BR","FONT","UL","LI"]);
+const NOTE_HI = "#fff3a8";                       // highlight yellow (N11)
+const NOTE_SECTION_CAP = 20000;                  // stored-html chars per day section
+let notesTab = "business", _notesSaveT = null, _notesCapWarned = false;
+
+/* Sanitizer (N6) — the XSS gate for html round-tripped through the doc/cloud. Runs on SAVE and on RENDER.
+   Parses in an INERT DOMParser document: assigning untrusted html to a live-document detached div still
+   starts <img src> fetches and fires their inline onerror DURING sanitization — an adopted hostile doc
+   must never execute anything before the strip. DOMParser documents load nothing and fire no handlers. */
+function sanitizeNoteHtml(html){
+  const box=new DOMParser().parseFromString(String(html==null?"":html), "text/html").body;
+  (function clean(node){
+    [...node.childNodes].forEach(c=>{
+      if(c.nodeType===3) return;                                   // text → keep
+      if(c.nodeType!==1){ c.remove(); return; }                    // comments etc. → drop
+      const tag=c.tagName.toUpperCase();
+      if(tag==="SCRIPT"||tag==="STYLE"||tag==="IFRAME"){ c.remove(); return; }  // dropped WITH content
+      if(!NOTE_TAGS.has(tag)){                                     // disallowed → unwrap, keep cleaned children
+        clean(c);
+        const par=c.parentNode; while(c.firstChild) par.insertBefore(c.firstChild, c);
+        par.removeChild(c); return;
+      }
+      const color=c.style?c.style.color:"", bg=c.style?c.style.backgroundColor:"";
+      const fontColor=(tag==="FONT")?c.getAttribute("color"):null;
+      [...c.attributes].forEach(a=>c.removeAttribute(a.name));     // kills on*, class, href, data-*, …
+      if(color) c.style.color=color;
+      if(bg && bg!=="transparent" && bg!=="rgba(0, 0, 0, 0)") c.style.backgroundColor=bg;  // keep highlight, drop un-highlight leftovers
+      if(fontColor) c.setAttribute("color",fontColor);
+      clean(c);
+    });
+  })(box);
+  return box.innerHTML;
+}
+function stripNoteText(html){ return (new DOMParser().parseFromString(String(html||""), "text/html").body.textContent||"").trim(); } // inert parse — counts/badges must never materialize stored html either
+
+/* ---- data accessors ---- */
+function notesOf(pid){
+  if(!DB.notes || typeof DB.notes!=="object" || Array.isArray(DB.notes)) DB.notes={};
+  let n=DB.notes[pid]; if(!n || typeof n!=="object") n=DB.notes[pid]={};
+  if(!Array.isArray(n.business)) n.business=[];
+  if(!Array.isArray(n.technical)) n.technical=[];
+  if(!Array.isArray(n.log)) n.log=[];
+  return n;
+}
+function notesCount(pid){ const n=notesOf(pid), c=a=>a.filter(s=>s && stripNoteText(s.html).length).length; return c(n.business)+c(n.technical); }
+function notesLogAdd(pid, entry){ const n=notesOf(pid); n.log.unshift(entry); if(n.log.length>200) n.log.length=200; }
+function notesOpen(){ const ov=el("notesOverlay"); return !!(ov && ov.style.display==="flex"); }
+
+/* ---- autosave engine: input → 600ms debounce → sanitize+collect → Store.save (which stamps F1 + cloud-pushes) ---- */
+function collectNotesFromDom(){
+  const out={business:[],technical:[]};
+  document.querySelectorAll("#notesOverlay .noteEdit").forEach(ed=>{
+    if(!(ed.textContent||"").trim()) return;                       // empty sections prune on save
+    let html=sanitizeNoteHtml(ed.innerHTML);
+    if(html.length>NOTE_SECTION_CAP){ html=html.slice(0,NOTE_SECTION_CAP); if(!_notesCapWarned){ _notesCapWarned=true; toast("โน้ตเกิน "+NOTE_SECTION_CAP.toLocaleString()+" ตัวอักษรต่อวัน — ตัดส่วนเกินออก"); } }
+    const col=ed.dataset.col, date=ed.dataset.date;
+    if(out[col] && date) out[col].push({date, html});
+  });
+  const newestFirst=(a,b)=> a.date<b.date?1:(a.date>b.date?-1:0);
+  out.business.sort(newestFirst); out.technical.sort(newestFirst);
+  return out;
+}
+function notesMarkDirty(){ notesChip("saving"); clearTimeout(_notesSaveT); _notesSaveT=setTimeout(notesFlush, 600); }
+function notesFlush(){
+  clearTimeout(_notesSaveT); _notesSaveT=null;
+  if(!PID || !notesOpen()) return;
+  const n=notesOf(PID), got=collectNotesFromDom();
+  n.business=got.business; n.technical=got.technical;
+  Store.save();
+  notesChip("saved"); notesSyncCounts();
+}
+function notesChip(state){
+  const c=el("notesChip"); if(!c) return;
+  if(state==="saving"){ c.textContent="กำลังบันทึก…"; c.className="saveChip"; }
+  else { c.textContent="บันทึกแล้ว ✓"; c.className="saveChip saved"; }
+}
+function notesSyncCounts(){
+  if(PID){ const cnt=notesCount(PID), num=el("sumNotesCount"), wrap=el("sumNotesBadge");
+    if(num) num.textContent=cnt;
+    if(wrap) wrap.style.display=cnt?"":"none"; }     // spec §4.1: badge only when notes exist — never "โน้ต (0)"
+  const n=PID?notesOf(PID):null; if(!n) return;
+  const c=a=>a.filter(s=>s && stripNoteText(s.html).length).length;
+  const liveCol=col=>{ let k=0; document.querySelectorAll('#notesOverlay .noteEdit[data-col="'+col+'"]').forEach(ed=>{ if((ed.textContent||"").trim()) k++; }); return k; };
+  const b=el("notesTabCountBiz"), t=el("notesTabCountTech");
+  if(b) b.textContent="("+(notesOpen()?liveCol("business"):c(n.business))+")";
+  if(t) t.textContent="("+(notesOpen()?liveCol("technical"):c(n.technical))+")";
+}
+
+/* ---- deletion + action log (N10): the UI's bin-confirm calls this AFTER removing the section's DOM ---- */
+function notesDeleteSection(col, date){
+  if(!PID) return;
+  notesLogAdd(PID, {ts:nowIso(), action:"delete", col:col, date:date});
+  notesFlush(); renderNotesLog();
+  toast("ลบโน้ตแล้ว · บันทึกลง log");
+}
+function renderNotesLog(){
+  const c=el("notesLogCount"), s=el("notesLogStrip"); if(!c||!s||!PID) return;
+  const L=notesOf(PID).log;
+  c.textContent=L.length;
+  s.innerHTML=L.length
+    ? L.map(e=> esc(fmtStamp(e.ts))+" · ลบโน้ต"+(e.col==="business"?"ธุรกิจ":"เทคนิค")+" "+esc(fmtStamp(e.date))).join("<br>")
+    : "ยังไม่มีการลบ";
+}
+
+/* ---- overlay shell: root DIV is CREATED BY JS (index.html is frozen — N4) ---- */
+function ensureNotesRoot(){ if(!el("notesOverlay")){ const d=document.createElement("div"); d.id="notesOverlay"; document.body.appendChild(d); } }
+function openNotes(){
+  if(!PID) return;
+  ensureNotesRoot();
+  const ov=el("notesOverlay"), P=proj(); if(!P) return;
+  notesTab="business";
+  ov.innerHTML=`
+    <div class="notesModal" role="dialog" aria-modal="true" aria-label="โน้ตโครงการ">
+      <div class="notesHead">
+        <span class="notesTitle">โน้ตโครงการ · ${esc(P.name)}</span>
+        <span class="saveChip saved" id="notesChip">บันทึกแล้ว ✓</span>
+        <button class="logChip" id="notesLogChip" title="ประวัติการลบ (action log)">log (<span id="notesLogCount">0</span>)</button>
+        <button class="closeX" id="notesClose" aria-label="ปิด">${IC.x}</button>
+      </div>
+      <div class="tabBar" role="tablist">
+        <button class="tabBtn on" id="notesTabBiz" role="tab" aria-selected="true" data-col="business">ธุรกิจ · BUSINESS <span class="tabCount" id="notesTabCountBiz"></span></button>
+        <button class="tabBtn" id="notesTabTech" role="tab" aria-selected="false" data-col="technical">เทคนิค · TECHNICAL <span class="tabCount" id="notesTabCountTech"></span></button>
+      </div>
+      <div class="logStrip" id="notesLogStrip"></div>
+      <div class="notesBody" id="notesBody"></div>
+    </div>`;
+  ov.style.display="flex";
+  requestAnimationFrame(()=>ov.classList.add("open"));
+  el("notesClose").onclick=closeNotes;
+  ov.onclick=e=>{ if(e.target===ov) closeNotes(); };
+  el("notesTabBiz").onclick =()=>notesSwitchTab("business");
+  el("notesTabTech").onclick=()=>notesSwitchTab("technical");
+  el("notesLogChip").onclick=()=>{ renderNotesLog(); el("notesLogStrip").classList.toggle("open"); };
+  renderNotesBody();
+  notesApplyTab();
+  renderNotesLog();
+  notesSyncCounts();
+}
+function closeNotes(){
+  if(_notesSaveT) notesFlush();                     // never lose a pending edit on close
+  const ov=el("notesOverlay"); if(!ov || ov.style.display!=="flex") return;
+  ov.classList.remove("open");
+  setTimeout(()=>{ ov.style.display="none"; ov.innerHTML=""; }, 180);
+  notesSyncCounts();
+}
+/* AUDIT FIX (major): route() knew nothing about the body-level overlay — browser Back/Forward while
+   the popup was open orphaned it, dropped the pending debounce (PID already null), or worse flushed
+   THIS project's DOM into the project the hash moved to. Called by route() BEFORE PID is reassigned,
+   so the flush lands under the project the notes belong to; teardown is instant (no animation). */
+function notesHardClose(){
+  if(!notesOpen()) return;
+  if(_notesSaveT) notesFlush();
+  const ov=el("notesOverlay"); ov.classList.remove("open"); ov.style.display="none"; ov.innerHTML="";
+}
+function notesSwitchTab(col){
+  if(col===notesTab) return;
+  if(_notesSaveT) notesFlush();                     // pending edit flushes BEFORE the other panel shows
+  notesTab=col; notesApplyTab();
+}
+function notesApplyTab(){
+  document.querySelectorAll("#notesBody .noteCol").forEach(cEl=> cEl.classList.toggle("active", cEl.dataset.col===notesTab));
+  [["notesTabBiz","business"],["notesTabTech","technical"]].forEach(([id,col])=>{
+    const b=el(id); if(!b) return;
+    b.classList.toggle("on", col===notesTab);
+    b.setAttribute("aria-selected", col===notesTab ? "true" : "false");
+  });
+}
+
+/* ===== WORKER-SLOT (v1.0.5 F2 UI): renderNotesBody =====
+   Renders BOTH .noteCol panels into #notesBody per the DOM contract above, porting the approved
+   prototype r4: sticky toolbar (B / I / bullets / highlight NOTE_HI / 6 foreColor swatches),
+   newest-first date sections with dashed dividers, lazy today section, bin + glass confirm
+   popover (calls notesDeleteSection(col,date) AFTER removing the section's DOM), plain-text
+   paste, input → notesMarkDirty(). Private helpers are prefixed notesUi*. */
+const NOTES_UI_COLORS = [                                   // toolbar text-colour palette (default = live ink token)
+  {css:"var(--ink)", val:"__ink__"}, {css:"#9241ff", val:"#9241ff"}, {css:"#4f98ff", val:"#4f98ff"},
+  {css:"#00ce83", val:"#00ce83"}, {css:"#ff9500", val:"#ff9500"}, {css:"#ff4a7b", val:"#ff4a7b"}
+];
+const notesUiInk = () => (getComputedStyle(document.documentElement).getPropertyValue("--ink").trim() || "#16181d");
+const notesUiPd  = e => e.preventDefault();                 // mousedown-preventDefault keeps the editor selection alive when a toolbar control is pressed
+
+function renderNotesBody(){
+  const body=el("notesBody"); if(!body) return;
+  body.innerHTML="";
+  const n = PID ? notesOf(PID) : {business:[], technical:[]};
+  body.appendChild(notesUiColumn("business",  "BUSINESS",  "โน้ตธุรกิจ", n.business  || []));   // business first (engine toggles .active)
+  body.appendChild(notesUiColumn("technical", "TECHNICAL", "โน้ตเทคนิค", n.technical || []));
+}
+function notesUiColumn(col, eyebrow, label, arr){
+  const wrap=document.createElement("div"); wrap.className="noteCol"; wrap.dataset.col=col;
+  const head=document.createElement("div"); head.className="noteColHead";
+  head.innerHTML='<span class="eyebrow">'+esc(eyebrow)+'</span><span class="noteColLab">'+esc(label)+'</span>';
+  wrap.appendChild(head);
+  const scroll=document.createElement("div"); scroll.className="colScroll";
+  scroll.appendChild(notesUiToolbar());
+  const tIso=iso(today());
+  /* AUDIT FIX: flush() replaces the stored arrays with whatever the DOM holds, so EVERY stored
+     section must render or it is silently deleted on the first autosave. Merge duplicates by date
+     (join with <br>) and fold date-less/malformed strays into today — never drop content. */
+  const byDate=new Map();
+  arr.forEach(s=>{
+    if(!s) return;
+    const d=(s.date && /^\d{4}-\d{2}-\d{2}$/.test(String(s.date))) ? s.date : tIso;
+    const h=s.html||"";
+    if(!byDate.has(d)) byDate.set(d, h);
+    else if(stripNoteText(h).length) byDate.set(d, byDate.get(d) + (stripNoteText(byDate.get(d)).length?"<br>":"") + h);
+  });
+  const tHtml=byDate.get(tIso)||""; byDate.delete(tIso);
+  const tDiv=notesUiDivider(col, tIso, true); tDiv.hidden = stripNoteText(tHtml).length===0;      // today divider hidden until there is content
+  scroll.appendChild(tDiv);
+  scroll.appendChild(notesUiEditor(col, tIso, tHtml, true));
+  [...byDate.keys()].sort().reverse()                                                             // newest-first
+     .forEach(d=>{ scroll.appendChild(notesUiDivider(col, d, false)); scroll.appendChild(notesUiEditor(col, d, byDate.get(d), false)); });
+  wrap.appendChild(scroll);
+  return wrap;
+}
+function notesUiToolbar(){
+  const bar=document.createElement("div"); bar.className="colToolbar";
+  const mkText=(label,cmd,italic)=>{ const b=document.createElement("button"); b.type="button"; b.className="fmtBtn"; b.textContent=label; b.style.fontWeight="700"; if(italic) b.style.fontStyle="italic"; b.addEventListener("mousedown", notesUiPd); b.onclick=()=>notesUiFmt(cmd); return b; };
+  const bull=document.createElement("button"); bull.type="button"; bull.className="fmtBtn"; bull.title="รายการหัวข้อ (bullets)";
+  bull.innerHTML='<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4.5" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="4.5" cy="18" r="1.4" fill="currentColor" stroke="none"/></svg>';
+  bull.addEventListener("mousedown", notesUiPd); bull.onclick=()=>notesUiFmt("insertUnorderedList");
+  const hi=document.createElement("button"); hi.type="button"; hi.className="fmtBtn"; hi.title="ไฮไลต์ (เหลืองอ่อน)";
+  hi.innerHTML='<svg viewBox="0 0 24 24" width="14" height="14"><rect x="3" y="18" width="18" height="4" rx="1.5" fill="#f2d21f"/><path d="m8.5 14.5 7-7a2 2 0 0 1 2.8 2.8l-7 7-3.6.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
+  hi.addEventListener("mousedown", notesUiPd); hi.onclick=notesUiHighlight;
+  bar.append(mkText("B","bold",false), mkText("I","italic",true), bull, hi);
+  const row=document.createElement("div"); row.className="swatchRow";
+  NOTES_UI_COLORS.forEach(c=>{ const s=document.createElement("button"); s.type="button"; s.className="swatch"; s.style.background=c.css; s.title="สีตัวอักษร"; s.addEventListener("mousedown", notesUiPd); s.onclick=()=>notesUiColor(c.val==="__ink__"?notesUiInk():c.val); row.appendChild(s); });
+  bar.appendChild(row);
+  return bar;
+}
+function notesUiEditor(col, date, html, isToday){
+  const ed=document.createElement("div");
+  ed.className="noteEdit"+(isToday?" today":"");
+  ed.contentEditable="true"; ed.spellcheck=false; ed.dataset.col=col; ed.dataset.date=date;       // data-date on EVERY editor — collectNotesFromDom() collects by it
+  if(isToday){ ed.dataset.today="1"; ed.dataset.ph="วันนี้ — พิมพ์โน้ตที่นี่…"; }
+  ed.innerHTML=sanitizeNoteHtml(html);                                                             // sanitize on render too (N6)
+  ed.addEventListener("input", notesUiInput);
+  ed.addEventListener("paste", notesUiPastePlain);
+  return ed;
+}
+function notesUiDivider(col, date, isToday){
+  const d=document.createElement("div"); d.className="dateDiv"; d.dataset.date=date;
+  d.innerHTML='<span class="dateChip">— '+esc(fmtStamp(date))+' —</span>';
+  const bin=document.createElement("button"); bin.type="button"; bin.className="binBtn"; bin.title="ลบโน้ตวันที่ "+fmtStamp(date); bin.innerHTML=IC.trash;
+  let disarmT=null, pop=null;
+  const disarm=()=>{ bin.classList.remove("armed"); if(pop){ const p=pop; pop=null; p.classList.remove("show"); setTimeout(()=>p.remove(),200); } };
+  const confirmDel=()=>{ clearTimeout(disarmT); disarm(); notesUiRemoveSection(col, date, d, isToday); };
+  bin.onclick=()=>{
+    if(bin.classList.contains("armed")){ confirmDel(); return; }                                   // second bin click confirms
+    bin.classList.add("armed");
+    pop=document.createElement("div"); pop.className="delPop";
+    pop.textContent="ลบโน้ต "+fmtStamp(date)+" ทั้งหมด? — คลิกเพื่อยืนยัน";
+    pop.onclick=e=>{ e.stopPropagation(); confirmDel(); };                                          // clicking the popover also confirms
+    d.appendChild(pop);
+    const left=bin.offsetLeft+bin.offsetWidth+8; pop.style.left=left+"px";                          // right of the bin…
+    requestAnimationFrame(()=>{ if(left+pop.offsetWidth > d.clientWidth-4){ pop.style.left=""; pop.style.right=(d.clientWidth-bin.offsetLeft+8)+"px"; } pop.classList.add("show"); });  // …flip left when it would clip the column edge
+    disarmT=setTimeout(disarm, 3200);                                                               // auto-disarm ~3.2s
+  };
+  d.appendChild(bin);
+  return d;
+}
+function notesUiRemoveSection(col, date, divEl, isToday){
+  const ed=divEl.nextElementSibling;                                                               // the editor always directly follows its divider
+  if(isToday || (ed && ed.dataset && ed.dataset.today)){ if(ed) ed.innerHTML=""; divEl.hidden=true; }  // today: clear content + re-hide divider (typing re-reveals it)
+  else { if(ed) ed.remove(); divEl.remove(); }                                                     // else remove the WHOLE day section
+  notesDeleteSection(col, date);                                                                   // engine appends the log entry + flushes + toasts (AFTER the DOM is gone)
+}
+function notesUiInput(e){
+  const ed=e.currentTarget;
+  if(ed.dataset.today){                                                                            // reveal / hide today's divider lazily
+    const has=(ed.textContent||"").trim().length>0;
+    const div=ed.previousElementSibling;
+    if(div && div.classList.contains("dateDiv")) div.hidden=!has;
+  }
+  notesSyncCounts(); notesMarkDirty();
+}
+function notesUiPastePlain(e){                                                                      // force plain-text paste (nothing foreign reaches the sanitizer)
+  e.preventDefault();
+  const t=(e.clipboardData||window.clipboardData).getData("text/plain");
+  document.execCommand("insertText", false, t);
+}
+/* AUDIT FIX (major): styleWithCSS is a DOCUMENT-GLOBAL, session-persistent execCommand mode. Setting
+   it for colour/highlight and never restoring it made every later bold/italic emit style-spans whose
+   font-weight/font-style the sanitizer strips — silently losing emphasis after the first colour use.
+   Every command goes through this wrapper, which ALWAYS restores the flag to false. */
+function notesUiExec(cmd, val, styleWithCss){
+  try{ document.execCommand("styleWithCSS", false, !!styleWithCss); }catch(e){}
+  document.execCommand(cmd, false, val==null?null:val);
+  try{ document.execCommand("styleWithCSS", false, false); }catch(e){}
+}
+function notesUiFmt(cmd){ notesUiExec(cmd, null, false); notesMarkDirty(); }
+function notesUiColor(val){ notesUiExec("foreColor", val, true); notesMarkDirty(); }
+function notesUiHighlight(){                                                                        // N11: detect highlighted state by DOM inspection (queryCommandValue is unreliable across the wrapping span)
+  const sel=window.getSelection(); if(!sel || !sel.rangeCount) return;
+  const range=sel.getRangeAt(0);
+  let anc=range.commonAncestorContainer; if(anc.nodeType!==1) anc=anc.parentElement;
+  const scope=(anc && anc.closest && anc.closest(".noteEdit")) || anc; if(!scope) return;
+  const hits=[...scope.querySelectorAll('[style*="background"]')].filter(n=> range.intersectsNode(n));
+  const ancsWithBg=[];
+  for(let p=anc; p && p!==scope.parentElement; p=p.parentElement){ if(p.style && p.style.backgroundColor) ancsWithBg.push(p); if(p===scope) break; }
+  if(!hits.length && !ancsWithBg.length){ notesUiExec("hiliteColor", NOTE_HI, true); }  // apply (wrapper restores styleWithCSS)
+  else { hits.forEach(n=> n.style.backgroundColor=""); ancsWithBg.forEach(n=> n.style.backgroundColor=""); }                                                             // whole-run removal (no partial splits)
+  notesMarkDirty();
+}
+
 /* =====================  INIT  ===================== */
 Store.load();
 applyTheme();                                          // §1.10: stamp html[data-theme] from ui.theme BEFORE the first render (no light→dark flash)
@@ -2266,6 +2611,7 @@ if(cloudOn()){ cloudSync(); window.addEventListener('focus', ()=>cloudPull(false
 document.addEventListener('keydown', e=>{
   if(e.key==="Escape"){
     if(el("modalRoot").style.display==="block") closeModal();
+    else if(notesOpen()) closeNotes();                              // v1.0.5 F2: notes popup closes before the overlays below it
     else if(el("historyOverlay").style.display==="flex" && PID) location.hash="project="+PID;
     else {
       const a=document.activeElement; if(a && a.closest && a.closest('.gripMenu')) a.blur();  // keyboard-opened menu: releases :focus-within
