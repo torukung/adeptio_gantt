@@ -172,4 +172,4 @@ Each stage: Opus-max implementer → 5-lens adversarial audit (spec / refute / d
 5. Regression: full existing suite stays green ×3.
 
 ## 6. Binding remarks
-All R-tags above (R-E1a–d, R-E2a–c, R-E3a–d, R-E4a–c) are binding, same contract as v1.0.4's R1–R12 / v1.0.5's N1–N11: the audit lenses check the diff against them explicitly.
+All R-tags above (R-E1a–d, R-E2a–c, R-E3a–d, R-E4a–c, R-E5a–c) are binding, same contract as v1.0.4's R1–R12 / v1.0.5's N1–N11: the audit lenses check the diff against them explicitly.

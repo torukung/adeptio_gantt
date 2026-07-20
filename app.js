@@ -137,6 +137,7 @@ function ic(p){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColo
 const IC = {
   caret: ic('<path d="M9 6l6 6-6 6"/>'),
   plus:  ic('<path d="M12 5v14M5 12h14"/>'),
+  addsub: ic('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 9v6M9 12h6"/>'),  // E5: module-container ＋ (add sub-module); distinct from bare `plus` = add feature
   trash: ic('<path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m-9 0l1 13a1 1 0 001 1h6a1 1 0 001-1l1-13"/>'),
   up:    ic('<path d="M12 19V6M6 11l6-6 6 6"/>'),
   down:  ic('<path d="M12 5v13M6 13l6 6 6-6"/>'),
@@ -1191,6 +1192,7 @@ function gripMenu(P, node, depth){
         + gmBtn("indent", IC.indent,  "เลื่อนเข้า (Indent)",  {disabled:!ind})
         + `<span class="gsep"></span>`
         + gmBtn("addfeat",IC.plus,    "เพิ่มฟีเจอร์")
+        + gmBtn("addsub", IC.addsub,  "เพิ่มโมดูลย่อยในโมดูลนี้")                                       // E5/R-E5a: containers only, right after ＋; opens moduleModal preset to Sub-Module under this node
         + gmBtn("promote",IC.promote, "เปลี่ยนเป็นฟีเจอร์ (Demote)", {disabled:!canDemote(P,id)})
         + gmBtn("editmod",IC.edit,    editT)
         + gmBtn("delmod", IC.trash,   "ลบโมดูล", {danger:true})
@@ -1528,6 +1530,7 @@ function onGridAction(e){
   const b=e.currentTarget, act=b.dataset.act, P=proj();
   if(act==="delcol"){ const cid=b.dataset.col; if(confirm("ลบคอลัมน์นี้และข้อมูลในคอลัมน์?")){ apply(P2=>{ P2.customCols=(P2.customCols||[]).filter(c=>c.id!==cid); walkFeatures(P2, f=>{ if(f.custom) delete f.custom[cid]; }); }); } return; }
   if(act==="addfeat"){ const host=b.closest('.modRow')||b.closest('.addFeat'); const cid=(host?host.dataset.nid:null)||b.dataset.nid; if(cid) featureModal(cid); return; } // R3: opens the modal pre-targeted; nothing is inserted until save
+  if(act==="addsub"){ const host=b.closest('.modRow'); const cid=host&&host.dataset.nid; if(cid) moduleModal(cid); return; } // E5/R-E5a: addsub lives on .modRow pills only; opens the create-module modal preset to Sub-Module under cid
   const rowEl=b.closest('.modRow')||b.closest('.featRow'); if(!rowEl) return;   // grips (moddrag/rowdrag) fall through to no-op
   const id=rowEl.dataset.nid;
   switch(act){
@@ -1710,14 +1713,16 @@ function nodeModal(id){
 /* module modal — CREATE-ONLY (D8: nodeModal owns all EDIT paths; a container's parentage now
    changes ONLY via indent/outdent/drag). Creates a root container ("main") or a child container
    under a chosen parent ("sub"); optional picker moves existing features into the new module. */
-function moduleModal(){
+function moduleModal(presetParentId){
   const P=proj();
   let color=(P.modules.length%PALETTE.length);
   const sw=PALETTE.map((p,i)=>`<div class="swatch ${i===color?'on':''}" data-c="${i}" style="background:${p.chip}"></div>`).join("");
   const parents=[]; walkTree(P.modules, n=>{ if(n.kind==="container") parents.push(n); });    // any container can be a parent
   const canSub=parents.length>0;
-  let kind="main";
-  let parentId=parents[0]?parents[0].id:"";
+  const preset=(presetParentId!=null)?findNode(P,presetParentId):null;                         // E5/R-E5a: grip "เพิ่มโมดูลย่อย" passes the clicked container; NO arg ⇒ today's behavior exactly
+  const presetOk=!!(preset && preset.kind==="container");                                       // only a resolved container pre-sets Sub-Module (a stale id falls back to default main)
+  let kind=presetOk?"sub":"main";
+  let parentId=presetOk?preset.id:(parents[0]?parents[0].id:"");                                // R-E5b: preset only changes the SELECTED parent — the dropdown still lists ALL containers
   const parentOpts=parents.map(m=>`<option value="${esc(m.id)}" ${m.id===parentId?'selected':''}>${esc(m.name)}</option>`).join("");
   const kindHint=parents.length===0 ? "ยังไม่มีโมดูลหลักอื่นให้สังกัด — สร้างโมดูลหลักก่อน" : "";
   /* optional picker to MOVE existing features (from any container) into the new module */

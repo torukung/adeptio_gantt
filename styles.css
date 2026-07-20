@@ -360,13 +360,14 @@ button{font-family:inherit; cursor:pointer;}
 .gripPill > button.gm.danger:hover{color:var(--ruby-adpt); border-color:#f3c2cf;}
 .gripPill > button.gm:disabled{color:var(--ink-faint); cursor:not-allowed;}
 .gripPill .gsep{flex:0 0 auto; width:1px; height:15px; background:var(--line-strong); margin:0 3px;}
-/* staggered reveal (transition-delay per position; gsep sit at child 3 & 6, so buttons are 1,2,4,5,7,8,9,10) */
+/* staggered reveal (transition-delay per position; gsep sit at child 3 & 6, so buttons are 1,2,4,5,7,8,9,10 — plus 11 on the container pill after E5 added addsub) */
 .gripMenu:hover > .gripPill > button.gm, .gripMenu:focus-within > .gripPill > button.gm{opacity:1;}
 .gripMenu:hover > .gripPill > button.gm:disabled, .gripMenu:focus-within > .gripPill > button.gm:disabled{opacity:.4;}
 .gripPill > button.gm:nth-child(1){transition-delay:.02s;} .gripPill > button.gm:nth-child(2){transition-delay:.05s;}
 .gripPill > button.gm:nth-child(4){transition-delay:.08s;} .gripPill > button.gm:nth-child(5){transition-delay:.11s;}
 .gripPill > button.gm:nth-child(7){transition-delay:.14s;} .gripPill > button.gm:nth-child(8){transition-delay:.17s;}
 .gripPill > button.gm:nth-child(9){transition-delay:.20s;} .gripPill > button.gm:nth-child(10){transition-delay:.23s;}
+.gripPill > button.gm:nth-child(11){transition-delay:.26s;}
 /* G4: Esc force-closes a HOVER-opened menu by stamping .gmSuppress on the .gripMenu — these override
    the :hover-open rules (extra class ⇒ higher/equal-and-later specificity) so the pill stays shut and
    the content stays put even while the pointer remains on the grip. JS clears the class on pointerleave
