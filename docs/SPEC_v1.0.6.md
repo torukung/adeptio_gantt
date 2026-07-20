@@ -2,7 +2,7 @@
 
 Branch: `v1.0.6` (from main `95bb8c5`, the v1.0.5 merge).
 Source of scope: ToR's tuning doc `20 Jul - Adeptio Gantt - v.1.0.3 - Tuning.docx` (2026-07-20) — four edits.
-Prototype (pending ToR approval): `v1.0.6 - Dev/prototype/PROTO_v1.0.6_four_edits.html` — artifact URL pinned here once published.
+Prototype (r1, pending ToR approval): https://claude.ai/code/artifact/d6aa9e86-33aa-4cad-b675-fd31d42c21c6 (local copy: `v1.0.6 - Dev/prototype/PROTO_v1.0.6_four_edits.html` in the vault — standalone, zero network).
 Operating model: **Fable** orchestrates / architects / audits / stages; **Opus 4.8 max** workers implement, write, and document; Fable re-tasks on error or stall. Workers never run git — Fable owns commits.
 
 **HARD SAFETY RULES (unchanged, non-negotiable)**
