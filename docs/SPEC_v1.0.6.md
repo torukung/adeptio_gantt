@@ -21,6 +21,7 @@ Operating model: **Fable** orchestrates / architects / audits / stages; **Opus 4
 | **E2** | "Undo/redo Button for 5 Steps" | 5-step undo/redo — toolbar buttons on dashboard + project topbar, ⌘Z/⇧⌘Z |
 | **E3** | "MS Excel, Apple Numbers, Google sheets Alignment … back-up and editable and upload back, in structure and consistency" | Structured spreadsheet round-trip: export the FULL tree (modules at every depth + features + custom cols) to .xlsx, edit externally, re-import losslessly with an import-preview confirm |
 | **E4** | "Make system LIVE sync with Cloudflare. Locale store or cache for performance basis, but without delay" | Live sync: faster push (250ms debounce + flush-on-hide), visible-tab polling every 5s, sync-status chip. Local-first storage unchanged |
+| **E5** | "Add option: On Module Menu bar: To add Sub-Module. Use same menu (Create Module), with pre-define parent modules" — added 2026-07-20 from ToR's v1.0.3.1 tuning docx | New grip-menu button on containers that opens the existing สร้างโมดูล modal pre-set to Sub-Module with the clicked container pre-selected as parent |
 
 **Release invariant: NO change to the stored doc shape.** `docVer` stays 2; no new doc keys. Undo history is session-only memory; sync tuning is client behavior; E1 is pure UI; E3 changes file formats, not the doc. Consequence: the v1.0.5↔v1.0.6 LWW window carries **no schema risk** (an old tab's save cannot drop new-shape data — there is none).
 
@@ -130,13 +131,36 @@ Facts that bound the design: prod doc ≈ 59 KB (rev 2027); `GET /api/state` ret
 - **(R-E4c)** The chip must never imply safety it doesn't have: while `pushPending` is latched the label is "กำลังซิงก์…" even if a poll succeeded meanwhile.
 
 ---
+## 5.4 E5 — grip-menu Sub-Module creation (ToR v1.0.3.1 docx, added mid-release)
+
+ToR's screenshots show the intent exactly: the container grip pill (image 1, the circled ＋) gains a
+**เพิ่มโมดูลย่อย** option; it opens the EXISTING `moduleModal()` (image 2) with ประเภท pre-set to
+โมดูลย่อย · Sub-Module and สังกัดโมดูลหลัก pre-selected to the clicked container. No new modal.
+
+- `moduleModal(presetParentId)` — optional arg. When set AND the id resolves to a container:
+  `kind` starts as `"sub"`, the parent `<select>` starts on that container, everything else
+  (name/desc/type toggle/colour/feature picker/save path) is byte-identical. The user may still
+  switch type or parent — pre-defined, not locked. No arg = today's behavior exactly.
+- **(R-E5a)** New grip-menu button on CONTAINER rows only, placed directly after the ＋ addfeat
+  button, icon = a container/folder-plus variant consistent with the IC set, tooltip
+  `เพิ่มโมดูลย่อยในโมดูลนี้`. It passes the row's data-nid as presetParentId. Features' pills unchanged.
+- **(R-E5b)** The parent dropdown lists ALL containers (as today); the preset merely selects one.
+  Save path already handles nested parents via `findNode` + `revealInto` — do not duplicate it.
+- **(R-E5c)** The grip pill's rail width is measured (`sizeGripRails`) — verify the wider pill still
+  slides correctly and doesn't overlay row content (G2 contract from v1.0.4).
+- Tests `submodmenu-v106.spec.js`: button present on container pills at depth 0 AND ≥1, absent on
+  feature pills; opens the modal with Sub-Module active + correct parent pre-selected; saving
+  creates the sub-container under that parent (flash + reveal); no-arg moduleModal (topbar
+  + Module button) unchanged; rail-slide still clears row content (R-E5c).
+
 ## 5.5 Commit plan (staged, audited, fixes-first n/a — no open fixes)
 
-1. `E1` drag date readout (+ CSS both themes) + tests
-2. `E2` undo/redo engine + buttons + keys + tests
-3. `E3` structured export/import + preview modal + tests
-4. `E4` live sync (push/pull/chip/flush) + tests
-5. docs: CHANGELOG + merge record skeleton
+1. `E1` drag date readout (+ CSS both themes) + tests — DONE `f4600cc`
+2. `E5` grip-menu sub-module creation + tests (inserted 2026-07-20 on ToR's instruction — build alongside the original four, before final audit/docs)
+3. `E2` undo/redo engine + buttons + keys + tests
+4. `E3` structured export/import + preview modal + tests
+5. `E4` live sync (push/pull/chip/flush) + tests
+6. docs: CHANGELOG + merge record skeleton
 
 Each stage: Opus-max implementer → 5-lens adversarial audit (spec / refute / data-safety / tests / style, 3-vote judge panels) → fix worker → Fable reads the full diff + runs the suite → commit. Suite must stay green (177 at branch point) and grow per §5.x below.
 
