@@ -227,7 +227,7 @@ function wireDragGuard(){                                                       
   document.addEventListener('pointerdown', e=>{ if(e.target && e.target.closest && e.target.closest(_DRAG_SEL)) _dragging=true; }, true);
   const endDrag=()=>{ _dragging=false; };
   document.addEventListener('pointerup', endDrag, true);
-  document.addEventListener('pointercancel', endDrag, true);
+  document.addEventListener('pointercancel', ()=>{ endDrag(); if(drag) drag._s=null; onBarUp(); }, true);   // R-E1d: a genuine cancel has NO trailing pointerup, so onBarUp never runs on its own → drive it here to tear the bar drag down (null _s ⇒ snap-back, not commit): it strips the window listeners + .dragging, clears userSelect, nulls drag, and hideTip(). Mirrors row/mod-drag's *Up self-heal; onBarUp self-guards (if(!drag) return) so module/row cancels just get its hideTip(). Leaving drag non-null would let the R-E1a hover guards kill every tooltip until the next full bar drag.
 }
 /* H2: the months-in-view readout depends on #rightScroll.clientWidth, which changes on a window resize
    with NO re-render. One debounced resize listener (wired once, like wireDragGuard) refreshes the readout
@@ -1374,9 +1374,10 @@ function tipEl(){
   if(!_tipEl || !_tipEl.isConnected){ _tipEl=document.createElement('div'); _tipEl.className='floatTip'; document.body.appendChild(_tipEl); }
   return _tipEl;
 }
-function showTip(text,x,y){ const t=tipEl(); t.textContent=text; t.style.display='block'; positionTip(x,y); }
+function showTip(text,x,y){ const t=tipEl(); t.classList.remove('dragDates'); t.textContent=text; t.style.display='block'; positionTip(x,y); }
+function showDragTip(html,x,y){ const t=tipEl(); t.classList.add('dragDates'); t.innerHTML=html; t.style.display='block'; positionTip(x,y); } // E1 (R-E1b): live date readout on the SAME singleton tip; html is fmtThai dates + static Thai labels only (no user text)
 function positionTip(x,y){ const t=_tipEl; if(!t) return; const pad=14, w=t.offsetWidth, h=t.offsetHeight; let tx=x+pad, ty=y+pad; if(tx+w>innerWidth-8) tx=x-w-pad; if(ty+h>innerHeight-8) ty=y-h-pad; t.style.left=Math.max(6,tx)+'px'; t.style.top=Math.max(6,ty)+'px'; }
-function hideTip(){ if(_tipEl) _tipEl.style.display='none'; }
+function hideTip(){ if(_tipEl){ _tipEl.style.display='none'; _tipEl.classList.remove('dragDates'); } } // R-E1b: drop the drag accent so the next hover tip is a plain tip
 /* True when `inner` is partially or fully outside the horizontal visible box of
    its scroll container (i.e. scrolled off the left/right edge). */
 function isClipped(inner, container){
@@ -1431,6 +1432,7 @@ function scheduleStickyLabels(){                                    // coalesce 
   _stickyRAF=requestAnimationFrame(()=>{ _stickyRAF=0; updateStickyLabels(); });
 }
 function onBoardOver(e){
+  if(drag) return;                                       // R-E1a: while a bar drag is live the drag readout owns the tip — hover logic must not fight it
   const t=e.target;
   const bar = t.closest && t.closest('.bar');
   if(bar){ const lbl=bar.querySelector('.blabel'); if(labelNeedsTip(lbl)){ showTip(lbl.textContent, e.clientX, e.clientY); } else hideTip(); return; }
@@ -1462,6 +1464,7 @@ function cellTipText(txt){
   return (fid.textContent.trim() + ' · ' + name).trim();
 }
 function onBoardMove(e){
+  if(drag) return;                                       // R-E1a
   const bar = e.target && e.target.closest && e.target.closest('.bar');
   if(bar){ const lbl=bar.querySelector('.blabel'); if(labelNeedsTip(lbl)) showTip(lbl.textContent, e.clientX, e.clientY); else hideTip(); return; }
   if(_tipEl && _tipEl.style.display==='block') positionTip(e.clientX, e.clientY);
@@ -1821,15 +1824,21 @@ function onBarDown(e){
   window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp); e.preventDefault();
 }
 function onBarMove(e){
-  if(!drag) return; const delta=Math.round((e.clientX-drag.startX)/drag.ppd); let s=drag.oS, en=drag.oE;
+  if(!drag) return; if(!_dragging){ drag._s=null; onBarUp(); return; }  // R-E1d self-heal: a capture-phase pointercancel cleared the guard mid-drag → abort the whole bar drag via onBarUp (null _s ⇒ snap-back, no commit), never just half-heal the tip on a stray frame
+  const delta=Math.round((e.clientX-drag.startX)/drag.ppd); let s=drag.oS, en=drag.oE;
   if(drag.mode==='move'){ s+=delta; en+=delta; } else if(drag.mode==='l'){ s=Math.min(drag.oS+delta,en); } else { en=Math.max(drag.oE+delta,s); }
   drag.bar.style.left=(s*drag.ppd+1)+"px"; drag.bar.style.width=((en-s+1)*drag.ppd-2)+"px";
   const ns=iso(addDays(drag.rStart,s)), ne=iso(addDays(drag.rStart,en));
   const si=el("leftBody").querySelector('input[data-nid="'+cssEsc(drag.id)+'"][data-field="start"]');
   const ei=el("leftBody").querySelector('input[data-nid="'+cssEsc(drag.id)+'"][data-field="end"]');
   if(si) si.value=ns; if(ei) ei.value=ne; drag._s=ns; drag._e=ne;
+  const a=fmtThai(parse(ns)), b=fmtThai(parse(ne)), dur=en-s+1;  // dur = inclusive day count (same math as the bar tooltip: daysBetween+1)
+  const html = drag.mode==='l' ? `เริ่ม ${a}<span class="dim">→ ${b} · ${dur} วัน</span>`
+             : drag.mode==='r' ? `สิ้นสุด ${b}<span class="dim">${a} → · ${dur} วัน</span>`
+             :                   `${a} → ${b} · ${dur} วัน`;
+  showDragTip(html, e.clientX, e.clientY);  // E1 (R-E1c): readout renders inside this existing frame — no new window listeners, no extra layout reads
 }
-function onBarUp(){ window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); if(!drag) return; document.body.style.userSelect=''; const d=drag; drag=null; d.bar.classList.remove('dragging'); if(d._s){ apply(P=>{ const f=findNode(P,d.id); if(f){ f.start=d._s; f.end=d._e; } }); } else renderTimeline(); } // commit through apply() (R2); a no-move drag just re-renders to snap back
+function onBarUp(){ window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); hideTip(); if(!drag) return; document.body.style.userSelect=''; const d=drag; drag=null; d.bar.classList.remove('dragging'); if(d._s){ apply(P=>{ const f=findNode(P,d.id); if(f){ f.start=d._s; f.end=d._e; } }); } else renderTimeline(); } // commit through apply() (R2); a no-move drag just re-renders to snap back. E1: hideTip() covers both the commit and no-move paths
 
 /* =====================  ROW DRAG-REORDER  ===================== */
 let rowDrag=null;

@@ -425,6 +425,12 @@ button{font-family:inherit; cursor:pointer;}
 
 /* --- Floating tooltip (bars + truncated Feature/Description cells) --- */
 .floatTip{position:fixed; z-index:9999; max-width:340px; padding:7px 12px; background:linear-gradient(180deg,#2a2540,#16181d); color:#fff; font-family:var(--font-body); font-weight:500; font-size:12px; line-height:1.45; border-radius:12px; box-shadow:0 8px 22px rgba(20,24,40,.30); border:1px solid rgba(146,65,255,.35); pointer-events:none; white-space:normal; word-break:break-word; display:none;}
+/* E1 (R-E1b): live date readout while a bar is moved/resized. Rides the deliberately-dark .floatTip
+   overlay (theme-invariant, same as the base tip — reads on both light and dark surfaces), with a
+   full-strength violet edge + mono/tabular date text so it signals "live data", not a hover hint.
+   .dim = the secondary line under a single-edge resize. */
+.floatTip.dragDates{border-color:var(--violet-adpt); box-shadow:0 8px 22px rgba(20,24,40,.30),0 0 0 1px rgba(146,65,255,.40); font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:13px; white-space:nowrap;}
+.floatTip.dragDates .dim{display:block; margin-top:2px; font-size:12px; opacity:.6;}
 
 /* --- Wrap Txt: allow Feature + Description cells to wrap to multiple lines --- */
 #board.wrapon .featRow{height:auto; min-height:var(--rowH);}
