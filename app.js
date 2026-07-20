@@ -138,6 +138,8 @@ const IC = {
   caret: ic('<path d="M9 6l6 6-6 6"/>'),
   plus:  ic('<path d="M12 5v14M5 12h14"/>'),
   addsub: ic('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 9v6M9 12h6"/>'),  // E5: module-container ＋ (add sub-module); distinct from bare `plus` = add feature
+  undo:  ic('<path d="M4 12a8 8 0 108-8 8 8 0 00-6.4 3.2"/><path d="M4 4.5V8h3.5"/>'),           // E2: counterclockwise arc arrow (undo)
+  redo:  ic('<path d="M20 12a8 8 0 11-8-8 8 8 0 016.4 3.2"/><path d="M20 4.5V8h-3.5"/>'),        // E2: clockwise arc arrow (redo) — mirror of undo
   trash: ic('<path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m-9 0l1 13a1 1 0 001 1h6a1 1 0 001-1l1-13"/>'),
   up:    ic('<path d="M12 19V6M6 11l6-6 6 6"/>'),
   down:  ic('<path d="M12 5v13M6 13l6 6 6-6"/>'),
@@ -180,13 +182,28 @@ function apiHeaders(extra){ const h = { "content-type":"application/json", ...(e
 function lsRev(){ try{ return (+(localStorage.getItem(LS_REV)||0))||0; }catch(e){ return 0; } }
 function setLsRev(r){ try{ localStorage.setItem(LS_REV, String(r)); }catch(e){} }
 
+/* ---- E2 undo/redo: whole-doc snapshots, session-only, capped at 5. History rides Store.save's
+   EXACT `s = JSON.stringify(DB)` (zero extra serialization). `_histBase` = serialized CURRENT state. */
+const UNDO_CAP = 5;
+let undoStack=[], redoStack=[], _histBase=null;
+/* FIX (audit E2/§3 no-op guarantee): Store.save restamps DB.updatedAt AND the current project's
+   updatedAt (v1.0.5 F1's ONE stamping point) BEFORE building `s`, so a content-identical save still
+   differs by the fresh ms timestamp. A raw `_histBase!==s` guard would therefore capture a slot on
+   EVERY save — benign summary→timeline tab switches, no-change modal saves, splitter clicks, drag-back-
+   to-origin — silently evicting real edits from the 5-deep budget and wiping redo. histKey() removes the
+   updatedAt stamps (doc level + per project — the ONLY fields Store.save bumps, and they live nowhere
+   nested) so the dirty-check compares CONTENT only ⇒ a DATA no-op spends no history slot, exactly as §3
+   promises. Done via parse/delete/stringify, NOT a regex: a first save ADDS a doc-level updatedAt that
+   the pre-save base lacks, and a regex strip would leave a dangling comma that fakes a diff. */
+function histKey(s){ try{ const o=JSON.parse(s); delete o.updatedAt; if(Array.isArray(o.projects)) o.projects.forEach(p=>{ if(p) delete p.updatedAt; }); return JSON.stringify(o); }catch(e){ return s; } }
+
 const Store = {
   load(){
     const raw = safeGet();
     if(raw){ try{ DB = JSON.parse(raw); }catch(e){ DB=null; } }
     if(!DB){ DB = MEM || seedDB(); }
     migrateDB(DB);                                    // v1.0.4: flat modules+parentId → recursive node tree (idempotent, per project)
-    MEM = DB; return DB;
+    MEM = DB; undoStack.length=0; redoStack.length=0; _histBase = JSON.stringify(DB); return DB;   // E2 R-E2a: (re)base history on the freshly-loaded (post-migrate) doc AND clear the stacks. Store.load replaces DB from an EXTERNAL source — startup (stacks already empty → no-op) OR a cross-tab `storage` write (init listener below). Clearing prevents a later undo from restoring a stale pre-sync snapshot and clobbering the sibling tab's committed write via LWW — the SAME hazard adoptRemote guards on the cloud channel, which the storage channel otherwise missed.
   },
   save(){
     /* v1.0.5 F1 (N2): the ONE stamping point — every doc mutation funnels through here, so
@@ -195,8 +212,10 @@ const Store = {
        by dashboard-level saves; the project modal stamps its own target explicitly. */
     DB.updatedAt = nowIso();
     const P0 = PID ? proj() : null; if(P0) P0.updatedAt = nowIso();
-    const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
-    refreshStamps();
+    const s=JSON.stringify(DB);
+    if(_histBase!==null && histKey(_histBase)!==histKey(s)){ undoStack.push(_histBase); if(undoStack.length>UNDO_CAP) undoStack.shift(); redoStack.length=0; } _histBase=s; // E2: capture the pre-edit snapshot on EVERY real save (incl. failed-LS below); updatedAt-STRIPPED dirty-check ⇒ a DATA no-op save spends no slot and preserves redo (§3); ui.* never reaches here (R-E2c)
+    if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
+    refreshStamps(); updateUndoUI();
   }
 };
 function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
@@ -207,6 +226,45 @@ function refreshStamps(){
   const s=el("statusStamp"); if(!s) return;
   const P = PID ? proj() : null;
   if(P && P.updatedAt) s.textContent = "แก้ไขล่าสุด " + fmtStamp(P.updatedAt);
+}
+
+/* =====================  UNDO / REDO ENGINE (E2)  ===================== */
+/* Restore path shared by undo()/redo(): must NEVER call Store.save() — that would restamp updatedAt
+   and re-capture history. The restored snapshot keeps its own updatedAt (an undo shows the stamp of
+   the state you went back to). Cloud push of the older doc is intended (LWW — the undo propagating). */
+function restoreSnapshot(s){
+  DB=JSON.parse(s); migrateDB(DB); MEM=DB; safeSet(s); _histBase=s;
+  if(cloudOn()) schedulePush();
+  rerenderAfterRestore();                                 // R-E2b: preserve view context
+  updateUndoUI(); refreshStamps();
+}
+function rerenderAfterRestore(){
+  const wasTimeline = ui.tab==="timeline";                // renderProject lands on summary → capture the tab BEFORE it resets
+  if(PID && DB.projects.some(p=>p.id===PID)){             // project still exists in the restored doc
+    renderProject(); if(wasTimeline) renderTab("timeline");
+  } else if(PID){                                         // the open project vanished (undid its creation) → dashboard
+    PID=null; location.hash=""; route();                 // §3 NOTE: a same-value ("") hash fires no hashchange → drive route() directly
+  } else {                                                // dashboard
+    renderDashboard();
+  }
+}
+function undo(){ if(!undoStack.length) return; const s=undoStack.pop(); redoStack.push(_histBase); restoreSnapshot(s); toast("เลิกทำแล้ว"); }
+function redo(){ if(!redoStack.length) return; const s=redoStack.pop(); undoStack.push(_histBase); restoreSnapshot(s); toast("ทำซ้ำแล้ว"); }
+function updateUndoUI(){                                   // disabled-state reflects stack emptiness; called after every save/undo/redo/adopt + inside renderDashboard/renderProject
+  const u=undoStack.length>0, r=redoStack.length>0;
+  document.querySelectorAll('[data-act="undo"]').forEach(b=> b.disabled=!u);
+  document.querySelectorAll('[data-act="redo"]').forEach(b=> b.disabled=!r);
+}
+function wireUndoButtons(){                                // fresh DOM after each render → (re)bind + refresh disabled state
+  document.querySelectorAll('[data-act="undo"]').forEach(b=> b.onclick=undo);
+  document.querySelectorAll('[data-act="redo"]').forEach(b=> b.onclick=redo);
+  updateUndoUI();
+}
+function undoGroupHtml(){                                  // shared markup for both surfaces (dashboard bar + project topbar)
+  return `<div class="toolgroup undoGrp">`
+    + `<button class="iconbtn" data-act="undo" title="เลิกทำ (สูงสุด 5 ขั้น)">${IC.undo}</button>`
+    + `<button class="iconbtn" data-act="redo" title="ทำซ้ำ">${IC.redo}</button>`
+    + `</div>`;
 }
 
 /* ---- cloud sync engine: local-first; the Worker's `rev` is the tiebreaker ---- */
@@ -261,7 +319,7 @@ function editingNow(){
   if(notesOpen()) return true;                 // v1.0.5 F2 (N5): never adopt a remote doc / re-render while the notes popup is open
   return false;
 }
-function adoptRemote(doc, rev){ DB=doc; migrateDB(DB); MEM=DB; safeSet(JSON.stringify(DB)); setLsRev(rev); route(); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent)
+function adoptRemote(doc, rev){ DB=doc; migrateDB(DB); MEM=DB; const s=JSON.stringify(DB); safeSet(s); setLsRev(rev); undoStack.length=0; redoStack.length=0; _histBase=s; route(); updateUndoUI(); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent). R-E2a: adopting another device's write CLEARS undo history + rebases _histBase to the adopted doc — undoing across it would silently clobber their work via LWW
 async function cloudPull(force){
   if(!cloudOn()) return false;
   try{
@@ -499,6 +557,7 @@ function renderDashboard(){
           <button class="btn primary" id="btnNewProj">${IC.plus}<span>โครงการใหม่</span></button>
           <span class="count">${ps.length} โครงการ</span>
           <span class="grow"></span>
+          ${undoGroupHtml()}
           <button class="btn" id="btnBackup">${IC.cloud}<span>สำรอง / กู้คืนข้อมูล</span></button>
         </div>
         <div class="grid">
@@ -518,11 +577,14 @@ function renderDashboard(){
   document.querySelectorAll('[data-act="delproj"]').forEach(b=> b.onclick = e=>{
     e.stopPropagation();
     const p=DB.projects.find(x=>x.id===b.dataset.id);
-    if(confirm(`ลบโครงการ “${p.name}” ทั้งหมด? การลบไม่สามารถย้อนกลับได้`)){
+    // E2 made project-delete a normal Store.save mutation → undo() restores it. Truth-in-UI (spec §4.4's
+    // precedent for the import warning): state that it's recoverable, don't claim irreversibility anymore.
+    if(confirm(`ลบโครงการ “${p.name}” ทั้งหมด? (เลิกทำได้ 1 ขั้น)`)){
       if(DB.notes) delete DB.notes[b.dataset.id];  // v1.0.5 F2: prune the project's notes in the same mutation
       DB.projects = DB.projects.filter(x=>x.id!==b.dataset.id); Store.save(); renderDashboard(); toast("ลบโครงการแล้ว");
     }
   });
+  wireUndoButtons();                                   // E2: bind + refresh disabled state on the fresh dashboard DOM
 }
 
 function projectModal(id){
@@ -575,6 +637,7 @@ function renderProject(){
           <button data-theme-set="dark" title="มืด">มืด</button>
         </div>
       </div>
+      ${undoGroupHtml()}
       <div class="toolgroup tlOnly">
         <span class="gl">Scroll</span>
         <div class="seg"><button id="colLeft" title="เลื่อนคอลัมน์ซ้าย">◀</button><span class="lbl">Cols</span><button id="colRight" title="เลื่อนคอลัมน์ขวา">▶</button></div>
@@ -683,6 +746,7 @@ function wireProjectControls(){
   el("btnPrint").onclick = ()=> window.print();
   const bd=el("btnDetails"); if(bd) bd.onclick=()=>{ const P=proj(); if(P.detailsUrl) window.open(P.detailsUrl,"_blank","noopener"); else detailsModal(); };
   const bde=el("btnDetailsEdit"); if(bde) bde.onclick=()=> detailsModal();
+  wireUndoButtons();                                   // E2: bind + refresh disabled state on the fresh project topbar DOM
 }
 
 /* ----- vertical splitter: resize the column pane ----- */
@@ -2615,6 +2679,7 @@ function notesUiHighlight(){                                                    
 Store.load();
 applyTheme();                                          // §1.10: stamp html[data-theme] from ui.theme BEFORE the first render (no light→dark flash)
 route();
+_histBase = JSON.stringify(DB);                        // FIX (audit E2/§3): the FIRST render performs lazy doc-completion (normalizeProgressOrder + per-module kpi + notes[pid] init) that Store.load's _histBase — captured BEFORE any render — doesn't yet reflect. Re-base to the just-rendered doc so the first no-op save (the summary→timeline autosave, or a splitter click before any real edit) doesn't capture that normalization as a phantom undo step. History base only — no mutation, no save, stacks stay empty.
 wireDragGuard();                                       // one centralized capture-phase pointerdown/up/cancel guard for background-sync deferral
 wireResizeGuard();                                     // H2: one debounced window-resize listener → refreshes the months-in-view readout (no re-render)
 wireThemeGuard();                                      // §1.10: AUTO mode re-applies the effective theme when the OS prefers-color-scheme flips (wired once)
@@ -2634,5 +2699,14 @@ document.addEventListener('keydown', e=>{
       // later move-away + re-hover opens it again.
       document.querySelectorAll('.gripMenu:hover').forEach(gm=>{ gm.classList.add('gmSuppress'); gm.addEventListener('pointerleave', ()=>gm.classList.remove('gmSuppress'), {once:true}); });
     }
+    return;
+  }
+  // E2: ⌘Z / Ctrl+Z → undo · ⇧⌘Z / Ctrl+Y → redo. editingNow() SUPPRESSES the shortcut in inputs/
+  // textarea/contenteditable, while notes or any modal/overlay is open, and mid-drag — the browser's
+  // native text-undo must win there (R-E2 §3). preventDefault only when the app actually handles the key.
+  if((e.metaKey||e.ctrlKey) && !e.altKey){
+    const k=e.key.toLowerCase();
+    if(k==="z"){ if(editingNow()) return; e.preventDefault(); e.shiftKey?redo():undo(); }
+    else if(k==="y"){ if(editingNow()) return; e.preventDefault(); redo(); }   // Ctrl+Y (Windows redo)
   }
 });

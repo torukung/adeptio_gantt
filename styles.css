@@ -120,6 +120,8 @@ button{font-family:inherit; cursor:pointer;}
 .iconbtn{width:24px; height:24px; border:1px solid transparent; background:transparent; border-radius:8px; display:flex; align-items:center; justify-content:center; color:var(--ink-soft); transition:.15s var(--ease);}
 .iconbtn:hover{background:#fff; border-color:var(--line-strong); color:var(--violet-adpt);}
 .iconbtn.danger:hover{color:#c0392b; border-color:#e9c4bf;}
+.iconbtn:disabled{opacity:.32; cursor:not-allowed;}                                         /* E2: undo/redo on an empty stack */
+.iconbtn:disabled:hover{background:transparent; border-color:transparent; color:var(--ink-soft);} /* …no hover lift while disabled */
 .iconbtn svg{width:14px; height:14px;}
 
 /* ===== PROJECT (GANTT) ===== */
@@ -656,6 +658,7 @@ button{font-family:inherit; cursor:pointer;}
   html[data-theme="dark"] .progGhost,
   html[data-theme="dark"] .iconbtn:hover,
   html[data-theme="dark"] .btn.details.gray:hover{ background:var(--ctl-hi); }
+  html[data-theme="dark"] .iconbtn:disabled:hover{ background:transparent; border-color:transparent; }  /* E2: keep disabled undo/redo flat in dark too */
   html[data-theme="dark"] .modGhost{ background:linear-gradient(180deg, var(--mod-grad-a), var(--mod-grad-b)); }
 
   /* ---- the DS “black” hover states invert on dark (black is invisible on a dark ground) ---- */
