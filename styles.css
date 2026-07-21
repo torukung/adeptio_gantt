@@ -120,6 +120,8 @@ button{font-family:inherit; cursor:pointer;}
 .iconbtn{width:24px; height:24px; border:1px solid transparent; background:transparent; border-radius:8px; display:flex; align-items:center; justify-content:center; color:var(--ink-soft); transition:.15s var(--ease);}
 .iconbtn:hover{background:#fff; border-color:var(--line-strong); color:var(--violet-adpt);}
 .iconbtn.danger:hover{color:#c0392b; border-color:#e9c4bf;}
+.iconbtn:disabled{opacity:.32; cursor:not-allowed;}                                         /* E2: undo/redo on an empty stack */
+.iconbtn:disabled:hover{background:transparent; border-color:transparent; color:var(--ink-soft);} /* …no hover lift while disabled */
 .iconbtn svg{width:14px; height:14px;}
 
 /* ===== PROJECT (GANTT) ===== */
@@ -132,6 +134,19 @@ button{font-family:inherit; cursor:pointer;}
 .brand .meta{font-family:var(--mono); font-size:11px; color:var(--ink-faint); margin-top:1px;}
 .toolgroup{display:flex; align-items:center; gap:7px; flex-wrap:wrap;}
 .toolgroup .gl{font-family:var(--mono); font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint);}
+/* E4 (§5): live-sync status chip — dashboard bar + project topbar. Direct-DOM-patched by
+   setSyncState()/paintSyncChip(); hidden entirely when cloud is off. Both themes via tokens;
+   the pulse respects prefers-reduced-motion. */
+.syncChip{display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 11px 0 9px; border:1px solid var(--line-strong); background:#fff; border-radius:var(--r-pill); font-family:var(--font-body); font-size:11.5px; font-weight:500; color:var(--ink-soft); white-space:nowrap;}
+.syncChip .scDot{width:7px; height:7px; border-radius:50%; background:var(--ink-faint); flex:0 0 auto;}
+.syncChip.synced{color:var(--ink-soft);}
+.syncChip.synced .scDot{background:var(--good);}
+.syncChip.syncing{color:var(--primary-ink); border-color:var(--primary-soft);}
+.syncChip.syncing .scDot{background:var(--violet-adpt); animation:scPulse 1.15s var(--ease) infinite;}
+.syncChip.offline{color:var(--ink-faint);}
+.syncChip.offline .scDot{background:var(--today);}
+@keyframes scPulse{ 0%,100%{opacity:1; transform:scale(1);} 50%{opacity:.35; transform:scale(.62);} }
+@media (prefers-reduced-motion:reduce){ .syncChip.syncing .scDot{animation:none;} }
 
 /* ---- project tab nav (Status & Summary | Timeline) ---- */
 .tabNav{display:flex; align-items:center; gap:6px; flex-wrap:wrap;}
@@ -360,13 +375,14 @@ button{font-family:inherit; cursor:pointer;}
 .gripPill > button.gm.danger:hover{color:var(--ruby-adpt); border-color:#f3c2cf;}
 .gripPill > button.gm:disabled{color:var(--ink-faint); cursor:not-allowed;}
 .gripPill .gsep{flex:0 0 auto; width:1px; height:15px; background:var(--line-strong); margin:0 3px;}
-/* staggered reveal (transition-delay per position; gsep sit at child 3 & 6, so buttons are 1,2,4,5,7,8,9,10) */
+/* staggered reveal (transition-delay per position; gsep sit at child 3 & 6, so buttons are 1,2,4,5,7,8,9,10 — plus 11 on the container pill after E5 added addsub) */
 .gripMenu:hover > .gripPill > button.gm, .gripMenu:focus-within > .gripPill > button.gm{opacity:1;}
 .gripMenu:hover > .gripPill > button.gm:disabled, .gripMenu:focus-within > .gripPill > button.gm:disabled{opacity:.4;}
 .gripPill > button.gm:nth-child(1){transition-delay:.02s;} .gripPill > button.gm:nth-child(2){transition-delay:.05s;}
 .gripPill > button.gm:nth-child(4){transition-delay:.08s;} .gripPill > button.gm:nth-child(5){transition-delay:.11s;}
 .gripPill > button.gm:nth-child(7){transition-delay:.14s;} .gripPill > button.gm:nth-child(8){transition-delay:.17s;}
 .gripPill > button.gm:nth-child(9){transition-delay:.20s;} .gripPill > button.gm:nth-child(10){transition-delay:.23s;}
+.gripPill > button.gm:nth-child(11){transition-delay:.26s;}
 /* G4: Esc force-closes a HOVER-opened menu by stamping .gmSuppress on the .gripMenu — these override
    the :hover-open rules (extra class ⇒ higher/equal-and-later specificity) so the pill stays shut and
    the content stays put even while the pointer remains on the grip. JS clears the class on pointerleave
@@ -425,6 +441,12 @@ button{font-family:inherit; cursor:pointer;}
 
 /* --- Floating tooltip (bars + truncated Feature/Description cells) --- */
 .floatTip{position:fixed; z-index:9999; max-width:340px; padding:7px 12px; background:linear-gradient(180deg,#2a2540,#16181d); color:#fff; font-family:var(--font-body); font-weight:500; font-size:12px; line-height:1.45; border-radius:12px; box-shadow:0 8px 22px rgba(20,24,40,.30); border:1px solid rgba(146,65,255,.35); pointer-events:none; white-space:normal; word-break:break-word; display:none;}
+/* E1 (R-E1b): live date readout while a bar is moved/resized. Rides the deliberately-dark .floatTip
+   overlay (theme-invariant, same as the base tip — reads on both light and dark surfaces), with a
+   full-strength violet edge + mono/tabular date text so it signals "live data", not a hover hint.
+   .dim = the secondary line under a single-edge resize. */
+.floatTip.dragDates{border-color:var(--violet-adpt); box-shadow:0 8px 22px rgba(20,24,40,.30),0 0 0 1px rgba(146,65,255,.40); font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:13px; white-space:nowrap;}
+.floatTip.dragDates .dim{display:block; margin-top:2px; font-size:12px; opacity:.6;}
 
 /* --- Wrap Txt: allow Feature + Description cells to wrap to multiple lines --- */
 #board.wrapon .featRow{height:auto; min-height:var(--rowH);}
@@ -460,6 +482,24 @@ button{font-family:inherit; cursor:pointer;}
 .swatch{width:28px; height:28px; border-radius:9px; cursor:pointer; border:2px solid transparent;}
 .swatch.on{border-color:var(--ink); box-shadow:0 0 0 2px #fff inset;}
 .modActsRow{display:flex; justify-content:flex-end; gap:9px; margin-top:18px;}
+
+/* E3 import preview (§4.4) — counts + custom summary + warnings + hard-truth line. Danger-primary
+   confirm reuses the brand ruby so "replace everything" reads as consequential. Both themes below. */
+.impPrev{margin:2px 0 2px;}
+.impCounts{font-family:var(--mono); font-size:13.5px; color:var(--ink); margin-bottom:11px;}
+.impCounts b{color:var(--violet-adpt); font-weight:700;}
+.impCols{font-size:12px; color:var(--ink-soft); margin-bottom:12px; line-height:1.9;}
+.impCols .tag{display:inline-block; font-family:var(--mono); font-size:11px; padding:1px 9px; border-radius:var(--r-pill); border:1px solid var(--line-strong); color:var(--ink-soft); margin:0 3px 2px 0;}
+.impCols .tag.new{color:var(--violet-adpt); border-color:var(--violet-adpt);}
+.impCols .tag.drop{color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); text-decoration:line-through;}  /* §4.3: existing custom column absent from the file — will be removed on confirm (token-driven, themes both ways) */
+.impWarns{list-style:none; margin:0 0 12px; padding:9px 12px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r-sm); max-height:190px; overflow:auto;}
+.impWarns li{font-size:12px; color:var(--ink-soft); padding:3px 0; display:flex; gap:8px; align-items:flex-start; line-height:1.45;}
+.impWarns li::before{content:"!"; flex:0 0 auto; width:16px; height:16px; margin-top:1px; border-radius:50%; background:rgba(255,171,64,.2); color:#b9740c; font-family:var(--mono); font-size:11px; font-weight:700; text-align:center; line-height:16px;}
+.impWarns .more{color:var(--ink-faint); font-style:italic;}
+.impWarns .more::before{visibility:hidden;}
+.impHard{font-size:12.5px; color:var(--ruby-adpt); background:rgba(255,74,123,.08); border:1px solid rgba(255,74,123,.28); border-radius:var(--r-sm); padding:9px 12px; line-height:1.5;}
+.btn.dangerPrimary{background:var(--ruby-adpt); border-color:var(--ruby-adpt); color:#fff;}
+.btn.dangerPrimary:hover{background:#e7396a; border-color:#e7396a; color:#fff;}
 
 /* module create — move-features picker (rows are <label>s inside .field; scope
    past the .field label rule so its uppercase/mono/block styling doesn't leak) */
@@ -633,6 +673,7 @@ button{font-family:inherit; cursor:pointer;}
   html[data-theme="dark"] .colHead .colTool,
   html[data-theme="dark"] .btn.danger,
   html[data-theme="dark"] .btn.details.gray{ background:var(--ctl); }
+  html[data-theme="dark"] .syncChip{ background:var(--ctl); }   /* E4: dark chip ground (dot colours + text adapt via tokens; syncing border stays --primary-soft) */
 
   /* native date pickers / selects → dark (the light rules force color-scheme:light) */
   html[data-theme="dark"] .sumDateWrap input[type=date],
@@ -649,6 +690,7 @@ button{font-family:inherit; cursor:pointer;}
   html[data-theme="dark"] .progGhost,
   html[data-theme="dark"] .iconbtn:hover,
   html[data-theme="dark"] .btn.details.gray:hover{ background:var(--ctl-hi); }
+  html[data-theme="dark"] .iconbtn:disabled:hover{ background:transparent; border-color:transparent; }  /* E2: keep disabled undo/redo flat in dark too */
   html[data-theme="dark"] .modGhost{ background:linear-gradient(180deg, var(--mod-grad-a), var(--mod-grad-b)); }
 
   /* ---- the DS “black” hover states invert on dark (black is invisible on a dark ground) ---- */
@@ -706,6 +748,9 @@ button{font-family:inherit; cursor:pointer;}
   /* the two sibling #f3c2cf danger hovers (grip-menu delete pill + KPI-table row delete) — same idiom as .iconbtn.danger:hover */
   html[data-theme="dark"] .gripPill > button.gm.danger:hover{ background:rgba(255,74,123,.14); color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); }
   html[data-theme="dark"] .kc-x .pmDel:hover{ background:rgba(255,74,123,.14); color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); }
+  /* E3 import-preview warning badge: light amber-on-cream → dark-legible amber (surface/panel/ruby tokens auto-theme) */
+  html[data-theme="dark"] .impWarns li::before{ background:rgba(255,171,64,.22); color:#ffcf8a; }
+  html[data-theme="dark"] .btn.dangerPrimary:hover{ background:#ff5c85; border-color:#ff5c85; }
 
   /* ---- bar chrome on dark: light-tint the drag-handle nub + drop the white label halo ---- */
   html[data-theme="dark"] .bar .blabel{ text-shadow:0 1px 2px rgba(0,0,0,.5); }

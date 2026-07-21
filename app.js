@@ -137,6 +137,9 @@ function ic(p){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColo
 const IC = {
   caret: ic('<path d="M9 6l6 6-6 6"/>'),
   plus:  ic('<path d="M12 5v14M5 12h14"/>'),
+  addsub: ic('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 9v6M9 12h6"/>'),  // E5: module-container ＋ (add sub-module); distinct from bare `plus` = add feature
+  undo:  ic('<path d="M4 12a8 8 0 108-8 8 8 0 00-6.4 3.2"/><path d="M4 4.5V8h3.5"/>'),           // E2: counterclockwise arc arrow (undo)
+  redo:  ic('<path d="M20 12a8 8 0 11-8-8 8 8 0 016.4 3.2"/><path d="M20 4.5V8h-3.5"/>'),        // E2: clockwise arc arrow (redo) — mirror of undo
   trash: ic('<path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m-9 0l1 13a1 1 0 001 1h6a1 1 0 001-1l1-13"/>'),
   up:    ic('<path d="M12 19V6M6 11l6-6 6 6"/>'),
   down:  ic('<path d="M12 5v13M6 13l6 6 6-6"/>'),
@@ -179,13 +182,28 @@ function apiHeaders(extra){ const h = { "content-type":"application/json", ...(e
 function lsRev(){ try{ return (+(localStorage.getItem(LS_REV)||0))||0; }catch(e){ return 0; } }
 function setLsRev(r){ try{ localStorage.setItem(LS_REV, String(r)); }catch(e){} }
 
+/* ---- E2 undo/redo: whole-doc snapshots, session-only, capped at 5. History rides Store.save's
+   EXACT `s = JSON.stringify(DB)` (zero extra serialization). `_histBase` = serialized CURRENT state. */
+const UNDO_CAP = 5;
+let undoStack=[], redoStack=[], _histBase=null;
+/* FIX (audit E2/§3 no-op guarantee): Store.save restamps DB.updatedAt AND the current project's
+   updatedAt (v1.0.5 F1's ONE stamping point) BEFORE building `s`, so a content-identical save still
+   differs by the fresh ms timestamp. A raw `_histBase!==s` guard would therefore capture a slot on
+   EVERY save — benign summary→timeline tab switches, no-change modal saves, splitter clicks, drag-back-
+   to-origin — silently evicting real edits from the 5-deep budget and wiping redo. histKey() removes the
+   updatedAt stamps (doc level + per project — the ONLY fields Store.save bumps, and they live nowhere
+   nested) so the dirty-check compares CONTENT only ⇒ a DATA no-op spends no history slot, exactly as §3
+   promises. Done via parse/delete/stringify, NOT a regex: a first save ADDS a doc-level updatedAt that
+   the pre-save base lacks, and a regex strip would leave a dangling comma that fakes a diff. */
+function histKey(s){ try{ const o=JSON.parse(s); delete o.updatedAt; if(Array.isArray(o.projects)) o.projects.forEach(p=>{ if(p) delete p.updatedAt; }); return JSON.stringify(o); }catch(e){ return s; } }
+
 const Store = {
   load(){
     const raw = safeGet();
     if(raw){ try{ DB = JSON.parse(raw); }catch(e){ DB=null; } }
     if(!DB){ DB = MEM || seedDB(); }
     migrateDB(DB);                                    // v1.0.4: flat modules+parentId → recursive node tree (idempotent, per project)
-    MEM = DB; return DB;
+    MEM = DB; undoStack.length=0; redoStack.length=0; _histBase = JSON.stringify(DB); return DB;   // E2 R-E2a: (re)base history on the freshly-loaded (post-migrate) doc AND clear the stacks. Store.load replaces DB from an EXTERNAL source — startup (stacks already empty → no-op) OR a cross-tab `storage` write (init listener below). Clearing prevents a later undo from restoring a stale pre-sync snapshot and clobbering the sibling tab's committed write via LWW — the SAME hazard adoptRemote guards on the cloud channel, which the storage channel otherwise missed.
   },
   save(){
     /* v1.0.5 F1 (N2): the ONE stamping point — every doc mutation funnels through here, so
@@ -194,8 +212,10 @@ const Store = {
        by dashboard-level saves; the project modal stamps its own target explicitly. */
     DB.updatedAt = nowIso();
     const P0 = PID ? proj() : null; if(P0) P0.updatedAt = nowIso();
-    const s=JSON.stringify(DB); if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
-    refreshStamps();
+    const s=JSON.stringify(DB);
+    if(_histBase!==null && histKey(_histBase)!==histKey(s)){ undoStack.push(_histBase); if(undoStack.length>UNDO_CAP) undoStack.shift(); redoStack.length=0; } _histBase=s; // E2: capture the pre-edit snapshot on EVERY real save (incl. failed-LS below); updatedAt-STRIPPED dirty-check ⇒ a DATA no-op save spends no slot and preserves redo (§3); ui.* never reaches here (R-E2c)
+    if(!safeSet(s)){ MEM=DB; if(!_lsWarned){ _lsWarned=true; toast("บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บเต็มหรือถูกปิด"); } } if(cloudOn()) schedulePush(); // FIX: warn once when localStorage write fails (quota/private mode) instead of failing silently
+    refreshStamps(); updateUndoUI();
   }
 };
 function proj(){ return DB.projects.find(p=>p.id===PID) || null; }
@@ -208,8 +228,75 @@ function refreshStamps(){
   if(P && P.updatedAt) s.textContent = "แก้ไขล่าสุด " + fmtStamp(P.updatedAt);
 }
 
+/* =====================  UNDO / REDO ENGINE (E2)  ===================== */
+/* Restore path shared by undo()/redo(): must NEVER call Store.save() — that would restamp updatedAt
+   and re-capture history. The restored snapshot keeps its own updatedAt (an undo shows the stamp of
+   the state you went back to). Cloud push of the older doc is intended (LWW — the undo propagating). */
+function restoreSnapshot(s){
+  DB=JSON.parse(s); migrateDB(DB); MEM=DB; safeSet(s); _histBase=s;
+  if(cloudOn()) schedulePush();
+  rerenderAfterRestore();                                 // R-E2b: preserve view context
+  updateUndoUI(); refreshStamps();
+}
+function rerenderAfterRestore(){
+  const wasTimeline = ui.tab==="timeline";                // renderProject lands on summary → capture the tab BEFORE it resets
+  if(PID && DB.projects.some(p=>p.id===PID)){             // project still exists in the restored doc
+    renderProject(); if(wasTimeline) renderTab("timeline");
+  } else if(PID){                                         // the open project vanished (undid its creation) → dashboard
+    PID=null; location.hash=""; route();                 // §3 NOTE: a same-value ("") hash fires no hashchange → drive route() directly
+  } else {                                                // dashboard
+    renderDashboard();
+  }
+}
+function undo(){ if(!undoStack.length) return; const s=undoStack.pop(); redoStack.push(_histBase); restoreSnapshot(s); toast("เลิกทำแล้ว"); }
+function redo(){ if(!redoStack.length) return; const s=redoStack.pop(); undoStack.push(_histBase); restoreSnapshot(s); toast("ทำซ้ำแล้ว"); }
+function updateUndoUI(){                                   // disabled-state reflects stack emptiness; called after every save/undo/redo/adopt + inside renderDashboard/renderProject
+  const u=undoStack.length>0, r=redoStack.length>0;
+  document.querySelectorAll('[data-act="undo"]').forEach(b=> b.disabled=!u);
+  document.querySelectorAll('[data-act="redo"]').forEach(b=> b.disabled=!r);
+}
+function wireUndoButtons(){                                // fresh DOM after each render → (re)bind + refresh disabled state
+  document.querySelectorAll('[data-act="undo"]').forEach(b=> b.onclick=undo);
+  document.querySelectorAll('[data-act="redo"]').forEach(b=> b.onclick=redo);
+  updateUndoUI();
+}
+function undoGroupHtml(){                                  // shared markup for both surfaces (dashboard bar + project topbar)
+  return `<div class="toolgroup undoGrp">`
+    + `<button class="iconbtn" data-act="undo" title="เลิกทำ (สูงสุด 5 ขั้น)">${IC.undo}</button>`
+    + `<button class="iconbtn" data-act="redo" title="ทำซ้ำ">${IC.redo}</button>`
+    + `</div>`;
+}
+
 /* ---- cloud sync engine: local-first; the Worker's `rev` is the tiebreaker ---- */
 let pushTimer=null, pushPending=false, pushFails=0;
+/* findings 6/7: serialize whole-doc pushes + track a push "generation" so (a) the 250ms debounce can't
+   fan out into overlapping out-of-order PUTs, and (b) a completing push never clears the latch out from
+   under a newer edit queued mid-flight (which a 5s poll could otherwise adopt over and silently drop). */
+let _pushGen=0, _pushInFlight=false;
+/* ---- E4 (§5) live-sync UI state: the sync-status chip + visibility-aware polling. Session-only. ---- */
+let lastSyncAt=0, _syncState='syncing';                 // chip label time + current visual state: 'syncing' | 'synced' | 'offline'
+const POLL_MS_VISIBLE=5000;                             // §5: visible-tab poll cadence (a hidden tab does NOT poll)
+let _pollTimer=null, _syncGuardWired=false, _flushed=false; // _flushed: one-shot latch so the two exit events (findings 1/5/9) flush at most once
+function fmtHM(ts){ const d=new Date(ts); const p2=n=>String(n).padStart(2,"0"); return p2(d.getHours())+":"+p2(d.getMinutes()); } // local HH:mm (fmtStamp p2-style)
+function setSyncState(state){                            // §5: the ONE chip driver — schedulePush / cloudPush ok·fail / cloudPull / visibility handlers call it
+  if(state==='synced' && (pushPending || pushFails>0))  // R-E4c + finding 3: a push is still OWED — latched in-flight (pushPending) OR a retry is armed after a failed push (pushFails>0). The chip must never imply the reassuring green 'synced' safety it does not have (e.g. a good GET during PUT backoff must NOT flip it green while the edit is still un-pushed).
+    state = pushPending ? 'syncing' : 'offline';
+  if(state==='synced') lastSyncAt=Date.now();           // stamp the moment of a GENUINE success only (nothing owed): push ok OR up-to-date poll
+  _syncState=state; paintSyncChip();
+}
+function paintSyncChip(){                                // DIRECT DOM patch (like refreshStamps) — never a re-render
+  document.querySelectorAll('#syncChip').forEach(chip=>{
+    if(!cloudOn()){ chip.style.display='none'; return; } // §5: chip hidden entirely when cloud is off
+    chip.style.display='';
+    const st=_syncState||'syncing';
+    chip.className='syncChip '+st;                       // drives dot colour + pulse via styles.css
+    const lbl=chip.querySelector('.scLabel');
+    if(lbl) lbl.textContent = st==='syncing' ? 'กำลังซิงก์…'
+      : st==='offline' ? 'ออฟไลน์ · จะซิงก์อัตโนมัติ'
+      : ('ซิงก์แล้ว ' + (lastSyncAt ? fmtHM(lastSyncAt) : ''));
+  });
+}
+function syncChipHtml(){ return `<span id="syncChip" class="syncChip syncing"${cloudOn()?"":' style="display:none"'}><span class="scDot"></span><span class="scLabel">กำลังซิงก์…</span></span>`; } // shared markup for both surfaces (dashboard bar + project topbar)
 /* Centralized drag guard (replaces the old per-handler interaction latch): while ANY
    pointer drag/resize is in flight, background cloud/storage sync must NOT re-render
    or adopt a remote doc (that would corrupt the drag). ONE capture-phase pointerdown
@@ -227,7 +314,7 @@ function wireDragGuard(){                                                       
   document.addEventListener('pointerdown', e=>{ if(e.target && e.target.closest && e.target.closest(_DRAG_SEL)) _dragging=true; }, true);
   const endDrag=()=>{ _dragging=false; };
   document.addEventListener('pointerup', endDrag, true);
-  document.addEventListener('pointercancel', endDrag, true);
+  document.addEventListener('pointercancel', ()=>{ endDrag(); if(drag) drag._s=null; onBarUp(); }, true);   // R-E1d: a genuine cancel has NO trailing pointerup, so onBarUp never runs on its own → drive it here to tear the bar drag down (null _s ⇒ snap-back, not commit): it strips the window listeners + .dragging, clears userSelect, nulls drag, and hideTip(). Mirrors row/mod-drag's *Up self-heal; onBarUp self-guards (if(!drag) return) so module/row cancels just get its hideTip(). Leaving drag non-null would let the R-E1a hover guards kill every tooltip until the next full bar drag.
 }
 /* H2: the months-in-view readout depends on #rightScroll.clientWidth, which changes on a window resize
    with NO re-render. One debounced resize listener (wired once, like wireDragGuard) refreshes the readout
@@ -237,19 +324,30 @@ function wireResizeGuard(){                                                     
   if(_resizeGuardWired) return; _resizeGuardWired=true;
   window.addEventListener('resize', ()=>{ clearTimeout(_resizeT); _resizeT=setTimeout(()=>{ if(el("rightScroll")) syncZoomUI(); }, 150); }); // debounced ~150ms; readout refresh ONLY when the timeline is present
 }
-function schedulePush(){ pushPending=true; clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, 800); }
-async function cloudPush(){
+function schedulePush(){ pushPending=true; _pushGen++; clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, 250); setSyncState('syncing'); } // §5: 250ms debounce (burst-coalesced; a drag commit stays one push) + chip → syncing. _pushGen bumps on each edit so a completing push can tell whether newer work was queued mid-flight (findings 6/7)
+async function cloudPush(opts){
   if(!cloudOn()) return;
+  const keepalive=!!(opts && opts.keepalive);
+  if(_pushInFlight && !keepalive) return;            // finding 7: at most ONE normal whole-doc PUT in flight — the 250ms debounce can't spawn overlapping out-of-order writes. A keepalive flush is exempt: it is the tab-close survivor and must always go out.
+  const gen=_pushGen;                                // finding 6: the generation this PUT persists; compared on completion
+  if(!keepalive) _pushInFlight=true;
+  const body=JSON.stringify({doc:DB});
+  const init={ method:"PUT", headers:apiHeaders(), body };
+  if(keepalive && body.length<=60000) init.keepalive=true; // R-E4a: flush the last edit past tab close/hide; keepalive bodies cap ~64KB → above 60000 fall back to a normal fetch (may be dropped on close — accepted; localStorage still holds the doc + next open re-pushes)
   try{
-    const res = await fetch(apiUrl("/api/state"), { method:"PUT", headers:apiHeaders(), body:JSON.stringify({doc:DB}) });
-    if(res.ok){ const j=await res.json(); if(j && typeof j.rev==="number") setLsRev(j.rev); pushPending=false; pushFails=0; return; }
+    const res = await fetch(apiUrl("/api/state"), init);
+    if(!keepalive) _pushInFlight=false;
+    if(res.ok){ const j=await res.json(); if(j && typeof j.rev==="number") setLsRev(j.rev); pushFails=0;
+      if(!keepalive && gen!==_pushGen){ clearTimeout(pushTimer); setSyncState('syncing'); return cloudPush(); } // finding 6/7: a newer edit landed while this PUT was in flight → push it NOW (the latch stays set, so a 5s poll can't adopt a remote over the still-un-pushed edit and drop it); coalesces the burst into one trailing push
+      pushPending=false; setSyncState('synced'); return; } // §5: successful push, nothing newer owed → chip synced HH:mm
     onPushFail();                                    // FIX: server rejected → clear latch + backoff retry (never leave pushPending stuck)
-  }catch(e){ onPushFail(); }                          // FIX: offline/blocked → clear latch + backoff retry
+  }catch(e){ if(!keepalive) _pushInFlight=false; onPushFail(); } // FIX: offline/blocked → clear latch + backoff retry
 }
-function onPushFail(){                                // FIX: clearing pushPending stops a failed push from permanently blocking cloudPull adoption
-  pushPending=false;
+function onPushFail(){                                // FIX: clearing pushPending stops a failed push from permanently blocking cloudPull adoption; the chip stays honest via setSyncState's pushFails>0 guard (finding 3), so a good GET during backoff can't paint it green while the edit is still owed
+  pushPending=false;                                 // NOTE: _pushInFlight is cleared by cloudPush's own !keepalive paths before we get here — onPushFail must NOT touch it (a keepalive flush failing must not release a concurrent normal push's serialization latch)
   const delay=Math.min(5000*(1<<Math.min(pushFails++,4)), 60000);
   clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, delay);
+  setSyncState('offline');                            // §5: failed push → chip offline (cleared only by the next genuine success)
 }
 function editingNow(){
   if(_dragging) return true;                  // never adopt a remote doc while a drag/resize is in flight
@@ -260,18 +358,21 @@ function editingNow(){
   if(notesOpen()) return true;                 // v1.0.5 F2 (N5): never adopt a remote doc / re-render while the notes popup is open
   return false;
 }
-function adoptRemote(doc, rev){ DB=doc; migrateDB(DB); MEM=DB; safeSet(JSON.stringify(DB)); setLsRev(rev); route(); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent)
+function adoptRemote(doc, rev, announce){ DB=doc; migrateDB(DB); MEM=DB; const s=JSON.stringify(DB); safeSet(s); setLsRev(rev); undoStack.length=0; redoStack.length=0; _histBase=s; route(); updateUndoUI(); if(announce) toast("อัปเดตจากเครื่องอื่นแล้ว"); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent). R-E2a: adopting another device's write CLEARS undo history + rebases _histBase to the adopted doc — undoing across it would silently clobber their work via LWW. R-E4b: `announce` toasts ONLY for a background/focus-pull adopt (never the initial seed or a manual restore)
 async function cloudPull(force){
   if(!cloudOn()) return false;
   try{
     const res = await fetch(apiUrl("/api/state"), { headers:apiHeaders() });
-    if(!res.ok) return false;
+    if(!res.ok){ setSyncState('offline'); return false; }
     const j = await res.json();
+    let adopted=false, newerDeferred=false;
     if(j && j.doc && typeof j.rev==="number"){
-      if(force || (j.rev > lsRev() && !pushPending && !editingNow())){ adoptRemote(j.doc, j.rev); return true; }
+      if(force || (j.rev > lsRev() && !pushPending && !editingNow())){ adoptRemote(j.doc, j.rev, !force); adopted=true; } // R-E4b: a background/focus pull (force=false) announces; a forced manual restore stays silent
+      else if(j.rev > lsRev()) newerDeferred=true;     // finding 4: a strictly-newer remote we did NOT adopt (deferred by editingNow()/pushPending) — we are NOT up to date, so this poll is not a 'synced' tick
     }
-    return false;
-  }catch(e){ return false; }
+    if(!newerDeferred) setSyncState('synced');         // finding 4: 'synced' only when the poll adopted OR was already up-to-date; a known-newer deferred remote leaves the chip as-is (never a false-green while sitting on a stale doc). R-E4c guard still demotes to 'syncing' when a push is pending.
+    return adopted;
+  }catch(e){ setSyncState('offline'); return false; }
 }
 async function cloudSync(){
   if(!cloudOn()) return;
@@ -280,13 +381,27 @@ async function cloudSync(){
     if(res.ok){
       const j = await res.json();
       if(j && j.doc){                                  // server already has data
-        if(j.rev > lsRev() || !safeGet()){ adoptRemote(j.doc, j.rev); toast("ซิงก์ข้อมูลจากคลาวด์แล้ว"); }
-        else cloudPush();                              // local is ahead/equal → push up
+        if(j.rev > lsRev() || !safeGet()){ adoptRemote(j.doc, j.rev); toast("ซิงก์ข้อมูลจากคลาวด์แล้ว"); setSyncState('synced'); } // initial seed adopt — NOT a cross-device announce (R-E4b)
+        else cloudPush();                              // local is ahead/equal → push up (cloudPush drives the chip)
       } else {
         cloudPush();                                   // server empty → seed it from local
       }
-    }
-  }catch(e){ /* offline → localStorage only */ }
+    } else setSyncState('offline');
+  }catch(e){ setSyncState('offline'); /* offline → localStorage only */ }
+}
+/* ---- E4 live-sync wiring: visibility-aware polling + flush-on-exit. Wired ONCE (like wireDragGuard). ---- */
+function startPoll(){ if(_pollTimer) return; _pollTimer=setInterval(()=>cloudPull(false), POLL_MS_VISIBLE); } // visible tab: poll every 5s
+function stopPoll(){ if(_pollTimer){ clearInterval(_pollTimer); _pollTimer=null; } }                          // hidden tab: no polling
+function flushOnExit(){ if(_flushed || !pushPending) return; _flushed=true; clearTimeout(pushTimer); cloudPush({keepalive:true}); } // R-E4a: fire the pending push immediately so the last edit survives tab close/switch. Findings 1/5/9: ONE-SHOT — a real tab close fires BOTH visibilitychange→hidden AND pagehide back-to-back, and cloudPush is async (pushPending isn't cleared synchronously), so an unguarded flush would issue a SECOND identical ~59KB PUT + rev bump to prod. The latch collapses it to a single flush.
+function wireSyncGuard(){
+  if(_syncGuardWired) return; _syncGuardWired=true;
+  window.addEventListener('focus', ()=>cloudPull(false));                                                     // existing focus-pull, now double-wire-guarded
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.hidden){ stopPoll(); flushOnExit(); }                                                         // R-E4a + stop the cadence while hidden
+    else { _flushed=false; cloudPull(false); startPoll(); }                                                   // visible again: re-arm the one-shot flush for a later close, do an immediate catch-up pull + resume cadence
+  });
+  window.addEventListener('pagehide', flushOnExit);                                                           // R-E4a: last-chance flush on close/navigation
+  if(!document.hidden) startPoll();                                                                           // begin polling if we loaded visible
 }
 
 /* =====================  SEED DATA  ===================== */
@@ -498,6 +613,7 @@ function renderDashboard(){
           <button class="btn primary" id="btnNewProj">${IC.plus}<span>โครงการใหม่</span></button>
           <span class="count">${ps.length} โครงการ</span>
           <span class="grow"></span>
+          ${undoGroupHtml()}${syncChipHtml()}
           <button class="btn" id="btnBackup">${IC.cloud}<span>สำรอง / กู้คืนข้อมูล</span></button>
         </div>
         <div class="grid">
@@ -517,11 +633,15 @@ function renderDashboard(){
   document.querySelectorAll('[data-act="delproj"]').forEach(b=> b.onclick = e=>{
     e.stopPropagation();
     const p=DB.projects.find(x=>x.id===b.dataset.id);
-    if(confirm(`ลบโครงการ “${p.name}” ทั้งหมด? การลบไม่สามารถย้อนกลับได้`)){
+    // E2 made project-delete a normal Store.save mutation → undo() restores it. Truth-in-UI (spec §4.4's
+    // precedent for the import warning): state that it's recoverable, don't claim irreversibility anymore.
+    if(confirm(`ลบโครงการ “${p.name}” ทั้งหมด? (เลิกทำได้ 1 ขั้น)`)){
       if(DB.notes) delete DB.notes[b.dataset.id];  // v1.0.5 F2: prune the project's notes in the same mutation
       DB.projects = DB.projects.filter(x=>x.id!==b.dataset.id); Store.save(); renderDashboard(); toast("ลบโครงการแล้ว");
     }
   });
+  wireUndoButtons();                                   // E2: bind + refresh disabled state on the fresh dashboard DOM
+  paintSyncChip();                                      // E4: sync the chip to the current session state on the fresh DOM
 }
 
 function projectModal(id){
@@ -574,6 +694,7 @@ function renderProject(){
           <button data-theme-set="dark" title="มืด">มืด</button>
         </div>
       </div>
+      ${undoGroupHtml()}${syncChipHtml()}
       <div class="toolgroup tlOnly">
         <span class="gl">Scroll</span>
         <div class="seg"><button id="colLeft" title="เลื่อนคอลัมน์ซ้าย">◀</button><span class="lbl">Cols</span><button id="colRight" title="เลื่อนคอลัมน์ขวา">▶</button></div>
@@ -682,6 +803,8 @@ function wireProjectControls(){
   el("btnPrint").onclick = ()=> window.print();
   const bd=el("btnDetails"); if(bd) bd.onclick=()=>{ const P=proj(); if(P.detailsUrl) window.open(P.detailsUrl,"_blank","noopener"); else detailsModal(); };
   const bde=el("btnDetailsEdit"); if(bde) bde.onclick=()=> detailsModal();
+  wireUndoButtons();                                   // E2: bind + refresh disabled state on the fresh project topbar DOM
+  paintSyncChip();                                      // E4: sync the chip to the current session state on the fresh DOM
 }
 
 /* ----- vertical splitter: resize the column pane ----- */
@@ -1191,6 +1314,7 @@ function gripMenu(P, node, depth){
         + gmBtn("indent", IC.indent,  "เลื่อนเข้า (Indent)",  {disabled:!ind})
         + `<span class="gsep"></span>`
         + gmBtn("addfeat",IC.plus,    "เพิ่มฟีเจอร์")
+        + gmBtn("addsub", IC.addsub,  "เพิ่มโมดูลย่อยในโมดูลนี้")                                       // E5/R-E5a: containers only, right after ＋; opens moduleModal preset to Sub-Module under this node
         + gmBtn("promote",IC.promote, "เปลี่ยนเป็นฟีเจอร์ (Demote)", {disabled:!canDemote(P,id)})
         + gmBtn("editmod",IC.edit,    editT)
         + gmBtn("delmod", IC.trash,   "ลบโมดูล", {danger:true})
@@ -1374,9 +1498,10 @@ function tipEl(){
   if(!_tipEl || !_tipEl.isConnected){ _tipEl=document.createElement('div'); _tipEl.className='floatTip'; document.body.appendChild(_tipEl); }
   return _tipEl;
 }
-function showTip(text,x,y){ const t=tipEl(); t.textContent=text; t.style.display='block'; positionTip(x,y); }
+function showTip(text,x,y){ const t=tipEl(); t.classList.remove('dragDates'); t.textContent=text; t.style.display='block'; positionTip(x,y); }
+function showDragTip(html,x,y){ const t=tipEl(); t.classList.add('dragDates'); t.innerHTML=html; t.style.display='block'; positionTip(x,y); } // E1 (R-E1b): live date readout on the SAME singleton tip; html is fmtThai dates + static Thai labels only (no user text)
 function positionTip(x,y){ const t=_tipEl; if(!t) return; const pad=14, w=t.offsetWidth, h=t.offsetHeight; let tx=x+pad, ty=y+pad; if(tx+w>innerWidth-8) tx=x-w-pad; if(ty+h>innerHeight-8) ty=y-h-pad; t.style.left=Math.max(6,tx)+'px'; t.style.top=Math.max(6,ty)+'px'; }
-function hideTip(){ if(_tipEl) _tipEl.style.display='none'; }
+function hideTip(){ if(_tipEl){ _tipEl.style.display='none'; _tipEl.classList.remove('dragDates'); } } // R-E1b: drop the drag accent so the next hover tip is a plain tip
 /* True when `inner` is partially or fully outside the horizontal visible box of
    its scroll container (i.e. scrolled off the left/right edge). */
 function isClipped(inner, container){
@@ -1431,6 +1556,7 @@ function scheduleStickyLabels(){                                    // coalesce 
   _stickyRAF=requestAnimationFrame(()=>{ _stickyRAF=0; updateStickyLabels(); });
 }
 function onBoardOver(e){
+  if(drag) return;                                       // R-E1a: while a bar drag is live the drag readout owns the tip — hover logic must not fight it
   const t=e.target;
   const bar = t.closest && t.closest('.bar');
   if(bar){ const lbl=bar.querySelector('.blabel'); if(labelNeedsTip(lbl)){ showTip(lbl.textContent, e.clientX, e.clientY); } else hideTip(); return; }
@@ -1462,6 +1588,7 @@ function cellTipText(txt){
   return (fid.textContent.trim() + ' · ' + name).trim();
 }
 function onBoardMove(e){
+  if(drag) return;                                       // R-E1a
   const bar = e.target && e.target.closest && e.target.closest('.bar');
   if(bar){ const lbl=bar.querySelector('.blabel'); if(labelNeedsTip(lbl)) showTip(lbl.textContent, e.clientX, e.clientY); else hideTip(); return; }
   if(_tipEl && _tipEl.style.display==='block') positionTip(e.clientX, e.clientY);
@@ -1525,6 +1652,7 @@ function onGridAction(e){
   const b=e.currentTarget, act=b.dataset.act, P=proj();
   if(act==="delcol"){ const cid=b.dataset.col; if(confirm("ลบคอลัมน์นี้และข้อมูลในคอลัมน์?")){ apply(P2=>{ P2.customCols=(P2.customCols||[]).filter(c=>c.id!==cid); walkFeatures(P2, f=>{ if(f.custom) delete f.custom[cid]; }); }); } return; }
   if(act==="addfeat"){ const host=b.closest('.modRow')||b.closest('.addFeat'); const cid=(host?host.dataset.nid:null)||b.dataset.nid; if(cid) featureModal(cid); return; } // R3: opens the modal pre-targeted; nothing is inserted until save
+  if(act==="addsub"){ const host=b.closest('.modRow'); const cid=host&&host.dataset.nid; if(cid) moduleModal(cid); return; } // E5/R-E5a: addsub lives on .modRow pills only; opens the create-module modal preset to Sub-Module under cid
   const rowEl=b.closest('.modRow')||b.closest('.featRow'); if(!rowEl) return;   // grips (moddrag/rowdrag) fall through to no-op
   const id=rowEl.dataset.nid;
   switch(act){
@@ -1707,14 +1835,16 @@ function nodeModal(id){
 /* module modal — CREATE-ONLY (D8: nodeModal owns all EDIT paths; a container's parentage now
    changes ONLY via indent/outdent/drag). Creates a root container ("main") or a child container
    under a chosen parent ("sub"); optional picker moves existing features into the new module. */
-function moduleModal(){
+function moduleModal(presetParentId){
   const P=proj();
   let color=(P.modules.length%PALETTE.length);
   const sw=PALETTE.map((p,i)=>`<div class="swatch ${i===color?'on':''}" data-c="${i}" style="background:${p.chip}"></div>`).join("");
   const parents=[]; walkTree(P.modules, n=>{ if(n.kind==="container") parents.push(n); });    // any container can be a parent
   const canSub=parents.length>0;
-  let kind="main";
-  let parentId=parents[0]?parents[0].id:"";
+  const preset=(presetParentId!=null)?findNode(P,presetParentId):null;                         // E5/R-E5a: grip "เพิ่มโมดูลย่อย" passes the clicked container; NO arg ⇒ today's behavior exactly
+  const presetOk=!!(preset && preset.kind==="container");                                       // only a resolved container pre-sets Sub-Module (a stale id falls back to default main)
+  let kind=presetOk?"sub":"main";
+  let parentId=presetOk?preset.id:(parents[0]?parents[0].id:"");                                // R-E5b: preset only changes the SELECTED parent — the dropdown still lists ALL containers
   const parentOpts=parents.map(m=>`<option value="${esc(m.id)}" ${m.id===parentId?'selected':''}>${esc(m.name)}</option>`).join("");
   const kindHint=parents.length===0 ? "ยังไม่มีโมดูลหลักอื่นให้สังกัด — สร้างโมดูลหลักก่อน" : "";
   /* optional picker to MOVE existing features (from any container) into the new module */
@@ -1821,15 +1951,21 @@ function onBarDown(e){
   window.addEventListener('pointermove', onBarMove); window.addEventListener('pointerup', onBarUp); e.preventDefault();
 }
 function onBarMove(e){
-  if(!drag) return; const delta=Math.round((e.clientX-drag.startX)/drag.ppd); let s=drag.oS, en=drag.oE;
+  if(!drag) return; if(!_dragging){ drag._s=null; onBarUp(); return; }  // R-E1d self-heal: a capture-phase pointercancel cleared the guard mid-drag → abort the whole bar drag via onBarUp (null _s ⇒ snap-back, no commit), never just half-heal the tip on a stray frame
+  const delta=Math.round((e.clientX-drag.startX)/drag.ppd); let s=drag.oS, en=drag.oE;
   if(drag.mode==='move'){ s+=delta; en+=delta; } else if(drag.mode==='l'){ s=Math.min(drag.oS+delta,en); } else { en=Math.max(drag.oE+delta,s); }
   drag.bar.style.left=(s*drag.ppd+1)+"px"; drag.bar.style.width=((en-s+1)*drag.ppd-2)+"px";
   const ns=iso(addDays(drag.rStart,s)), ne=iso(addDays(drag.rStart,en));
   const si=el("leftBody").querySelector('input[data-nid="'+cssEsc(drag.id)+'"][data-field="start"]');
   const ei=el("leftBody").querySelector('input[data-nid="'+cssEsc(drag.id)+'"][data-field="end"]');
   if(si) si.value=ns; if(ei) ei.value=ne; drag._s=ns; drag._e=ne;
+  const a=fmtThai(parse(ns)), b=fmtThai(parse(ne)), dur=en-s+1;  // dur = inclusive day count (same math as the bar tooltip: daysBetween+1)
+  const html = drag.mode==='l' ? `เริ่ม ${a}<span class="dim">→ ${b} · ${dur} วัน</span>`
+             : drag.mode==='r' ? `สิ้นสุด ${b}<span class="dim">${a} → · ${dur} วัน</span>`
+             :                   `${a} → ${b} · ${dur} วัน`;
+  showDragTip(html, e.clientX, e.clientY);  // E1 (R-E1c): readout renders inside this existing frame — no new window listeners, no extra layout reads
 }
-function onBarUp(){ window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); if(!drag) return; document.body.style.userSelect=''; const d=drag; drag=null; d.bar.classList.remove('dragging'); if(d._s){ apply(P=>{ const f=findNode(P,d.id); if(f){ f.start=d._s; f.end=d._e; } }); } else renderTimeline(); } // commit through apply() (R2); a no-move drag just re-renders to snap back
+function onBarUp(){ window.removeEventListener('pointermove', onBarMove); window.removeEventListener('pointerup', onBarUp); hideTip(); if(!drag) return; document.body.style.userSelect=''; const d=drag; drag=null; d.bar.classList.remove('dragging'); if(d._s){ apply(P=>{ const f=findNode(P,d.id); if(f){ f.start=d._s; f.end=d._e; } }); } else renderTimeline(); } // commit through apply() (R2); a no-move drag just re-renders to snap back. E1: hideTip() covers both the commit and no-move paths
 
 /* =====================  ROW DRAG-REORDER  ===================== */
 let rowDrag=null;
@@ -2080,24 +2216,46 @@ function onWrapToggle(e){
 }
 
 /* =====================  EXCEL EXPORT / IMPORT  ===================== */
-function exportXlsx(){
-  if(typeof XLSX==="undefined"){ toast("ไลบรารี Excel โหลดไม่สำเร็จ (ต้องต่ออินเทอร์เน็ต)"); return; }
-  const P=proj(), customLabels=P.customCols.map(c=>c.label);
-  const header=["Module","Feature ID","Feature","Description","Start","End","Status","Remark",...customLabels];
+const APP_VER = "v1.0.6";
+/* §4.2 EXPORT — sheet "Timeline", ONE row per NODE (containers AND features) in tree order.
+   Columns: Type | Level | Node ID | Feature ID | Name | Description | Start | End | Status | Remark | Color | <custom labels…>
+   Node ID is what makes re-import lossless (identity / progressOrder / KPI carry-over). Built via a
+   pure helper so the round-trip test (§5.x-3) can XLSX.write(timelineWorkbook(P)) in-page. */
+function timelineWorkbook(P){
+  const custom=P.customCols||[];
+  const header=["Type","Level","Node ID","Feature ID","Name","Description","Start","End","Status","Remark","Color",...custom.map(c=>c.label)];
   const aoa=[header];
-  // §4: rows in flatten order; Module column = full container path "A › B › C".
-  const path=[];
-  (function rec(nodes){
+  (function rec(nodes, level){
     (nodes||[]).forEach(n=>{
       if(!n) return;
-      if(n.kind==="container"){ path.push(n.name); rec(n.children||[]); path.pop(); }
-      else aoa.push([path.join(" › "),n.fid||"",n.name,n.description||"",n.start,n.end,stById(n.status).en,n.remark||"",...P.customCols.map(c=>(n.custom&&n.custom[c.id])||"")]);
+      if(n.kind==="container"){
+        aoa.push(["Module",level,n.id,"",n.name||"",n.description||"","","","","",(n.color!=null?n.color:0),...custom.map(()=>"")]);   // containers: Name/Description/Color; the rest blank
+        rec(n.children||[], level+1);
+      } else {
+        aoa.push(["Feature",level,n.id,n.fid||"",n.name||"",n.description||"",n.start||"",n.end||"",stById(n.status).en,n.remark||"","",...custom.map(c=>(n.custom&&n.custom[c.id])||"")]); // features: fid, ISO dates AS STRINGS, EN status label, customs by column
+      }
     });
-  })(P.modules);
+  })(P.modules, 1);
   const ws=XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:26},{wch:11},{wch:30},{wch:40},{wch:12},{wch:12},{wch:13},{wch:18},...customLabels.map(()=>({wch:18}))];
-  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Timeline");
-  XLSX.writeFile(wb, safeName(P.code||P.name)+"_Timeline.xlsx"); toast("ส่งออก Excel แล้ว");
+  ws['!cols']=[{wch:9},{wch:6},{wch:15},{wch:12},{wch:30},{wch:38},{wch:12},{wch:12},{wch:13},{wch:18},{wch:7},...custom.map(()=>({wch:16}))];
+  let nc=0, nf=0; walkTree(P.modules, n=>{ if(!n) return; n.kind==="container"?nc++:nf++; });
+  const info=XLSX.utils.aoa_to_sheet([                                     // §4.2 Sheet 2 "Info": read-only convenience, IGNORED on import
+    ["Adeptio Gantt — Timeline"],
+    ["Project", P.name||""], ["Client", P.client||""], ["Code", P.code||""],
+    ["Exported", nowIso()], ["App version", APP_VER],
+    ["Modules", nc], ["Features", nf],
+    [""],
+    ["หมายเหตุ", "แก้ไขชีต Timeline แล้วนำเข้ากลับได้ · ชีต Info นี้จะถูกข้ามเมื่อนำเข้า"],
+  ]);
+  info['!cols']=[{wch:16},{wch:46}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,"Timeline"); XLSX.utils.book_append_sheet(wb,info,"Info");
+  return wb;
+}
+function exportXlsx(){
+  if(typeof XLSX==="undefined"){ toast("ไลบรารี Excel โหลดไม่สำเร็จ (ต้องต่ออินเทอร์เน็ต)"); return; }
+  const P=proj(); if(!P) return;
+  XLSX.writeFile(timelineWorkbook(P), safeName(P.code||P.name)+"_Timeline.xlsx"); toast("ส่งออก Excel แล้ว");
 }
 function onImportFile(e){
   const file=e.target.files[0]; if(!file) return;
@@ -2126,34 +2284,177 @@ function toISO(v){
   m=s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/); if(m){ let y=+m[3]; if(y<100)y+=2000; if(y>2400)y-=543; return y+"-"+String(+m[2]).padStart(2,"0")+"-"+String(+m[1]).padStart(2,"0"); }
   const d=new Date(s); return isNaN(d)?"":iso(new Date(d.getFullYear(),d.getMonth(),d.getDate()));
 }
-function importWorkbook(buf){
-  const wb=XLSX.read(buf,{type:"array"}), ws=wb.Sheets[wb.SheetNames[0]];
-  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:""});
-  let hi=-1; for(let i=0;i<Math.min(aoa.length,8);i++){ if(aoa[i].filter(c=>matchKey(c)).length>=2){ hi=i; break; } }
-  if(hi<0){ toast("ไม่พบหัวคอลัมน์ที่รองรับ"); return; }
-  const headers=aoa[hi], map={}, customDefs=[];
-  headers.forEach((h,ci)=>{ if(String(h).trim()==="") return; const k=matchKey(h); if(k) map[k]=ci; else customDefs.push({id:"c"+(_seq++),label:String(h).trim(),w:150,kind:"text",col:ci}); });
-  if(map.name==null){ toast("ต้องมีคอลัมน์ Feature/ชื่อ"); return; }
-  const groups=new Map();
-  for(let i=hi+1;i<aoa.length;i++){
+/* §4.3 structured header aliases (case-insensitive trim). Insertion order matters: a bare `id`
+   resolves to `nodeid` (identity) BEFORE `fid` — the two are distinct columns on export. */
+const S_ALIASES={
+  type:["type","ประเภท","ชนิด"],
+  level:["level","ระดับ","depth","ชั้น"],
+  nodeid:["node id","nodeid","node_id","nid","id"],
+  fid:["feature id","fid","feature_id","รหัส"],
+  name:["name",...ALIASES.name],
+  description:ALIASES.description, start:ALIASES.start, end:ALIASES.end, status:ALIASES.status, remark:ALIASES.remark,
+  color:["color","colour","สี"],
+};
+function matchStructKey(h){ const k=String(h).trim().toLowerCase(); for(const std in S_ALIASES){ if(S_ALIASES[std].includes(k)) return std; } return null; }
+/* Header → {map:stdKey→colIdx, cols:[custom col defs]}. Unknown headers become custom columns BY LABEL:
+   an exact (trim, case-sensitive) match to an existing customCols[].label REUSES that col's id/w/kind;
+   otherwise a fresh col is minted. Shared by both import paths (keymatch differs). */
+function resolveHeaders(headers, keymatch, P){
+  const map={}, cols=[], byLabel=new Map((P.customCols||[]).map(c=>[String(c.label).trim(),c]));
+  (headers||[]).forEach((h,ci)=>{
+    const label=String(h).trim(); if(label==="") return;
+    const k=keymatch(h); if(k && map[k]==null){ map[k]=ci; return; }   // claim the standard slot ONLY if still free; a header whose key is already mapped (a custom col whose label equals a reserved alias — "Notes"→remark, "Status", "สี"→color…) falls through to custom handling instead of being silently dropped (finding: round-trip data loss)
+    const ex=byLabel.get(label);
+    if(ex){ if(!cols.some(c=>c.id===ex.id)) cols.push({id:ex.id,label:ex.label,w:ex.w,kind:ex.kind,col:ci,reused:true}); }
+    else if(!cols.some(c=>c.label===label)) cols.push({id:"c"+(_seq++),label,w:150,kind:"text",col:ci,reused:false});
+  });
+  return {map, cols};
+}
+/* §4.3 structured parse — tolerant (R-E3a). Container stack reconstruction; NO doc mutation. */
+function parseStructured(aoa, hdr){
+  const P=proj(), {map,cols}=resolveHeaders(hdr.headers, matchStructKey, P);
+  const warnings=[], roots=[], stack=[], seen=new Set(); let recovery=null;
+  const toNum=v=>{ const s=String(v==null?"":v).trim(); if(s==="") return null; const n=Number(s); return isNaN(n)?null:Math.round(n); };
+  const mkId=(raw,rowNo)=>{ const id=String(raw==null?"":raw).trim(); if(id==="") return nid(); if(seen.has(id)){ warnings.push(`แถว ${rowNo}: Node ID ซ้ำ — สร้างรหัสใหม่`); return nid(); } seen.add(id); return id; };
+  const cell=(row,k)=>map[k]!=null?String(row[map[k]]).trim():"";
+  for(let i=hdr.hi+1;i<aoa.length;i++){
     const row=aoa[i]; if(!row||row.every(c=>String(c).trim()==="")) continue;
-    const modName=(map.module!=null?String(row[map.module]).trim():"")||"Imported";
-    const name=String(row[map.name]).trim(); if(!name) continue;
+    const rowNo=i+1, name=cell(row,"name"), t=cell(row,"type").toLowerCase();
+    let isCont=(t==="module"||t==="m"||t==="mod"||t==="โมดูล"||t==="container");
+    let isFeat=(t==="feature"||t==="f"||t==="feat"||t==="ฟีเจอร์");
+    if(!isCont&&!isFeat){ if(name===""){ continue; } isFeat=true; }                      // blank/other Type + Name → feature; blank both → skip
+    if(isCont){
+      const depth=stack.length; let L=toNum(map.level!=null?row[map.level]:"");
+      if(L==null||L<=0){ if(cell(row,"level")!=="") warnings.push(`แถว ${rowNo}: ระดับไม่ถูกต้อง — ปรับเป็นระดับ 1`); L=1; }
+      else if(L>depth+1){ L=depth+1; warnings.push(`แถว ${rowNo}: level ข้ามขั้น — ปรับเป็นระดับ ${L}`); }   // R-E3a: jump > +1 clamps to stack depth+1
+      while(stack.length>L-1) stack.pop();
+      let color=0; if(map.color!=null){ const cv=toNum(row[map.color]); if(cv!=null) color=((cv%PALETTE.length)+PALETTE.length)%PALETTE.length; }
+      const node={id:mkId(map.nodeid!=null?row[map.nodeid]:"",rowNo),kind:"container",name:name||"โมดูล",description:cell(row,"description"),color,collapsed:false,children:[]};
+      (stack.length?stack[stack.length-1].children:roots).push(node); stack.push(node);
+    } else {
+      // R-E3a: a VALID feature Level positions it — its parent is the container at level L−1, so pop the stack
+      // to depth L−1 before attaching. A feature that follows a sub-container among its siblings must land back
+      // on the shallower parent, NOT the deepest open container (that silent re-nesting broke the export→import
+      // round-trip). Missing/≤0/non-numeric Level, or a Level deeper than the open stack → stack-top (no pop).
+      // §4.2 exports each feature's own Level precisely so import can honour it.
+      let L=toNum(map.level!=null?row[map.level]:"");
+      if(L!=null&&L>0){ while(stack.length>L-1) stack.pop(); }
+      let cont=stack[stack.length-1];
+      if(!cont){ if(!recovery){ recovery={id:nid(),kind:"container",name:"(นำเข้า)",description:"",color:0,collapsed:false,children:[]}; roots.push(recovery); } cont=recovery; warnings.push(`แถว ${rowNo}: ฟีเจอร์ไม่มีโมดูลด้านบน — ใส่ไว้ในโมดูล “(นำเข้า)”`); }   // R-E3a orphan recovery (also fires for a valid level-1 feature: nothing at level 0 to hold it)
+      let s=map.start!=null?toISO(row[map.start]):"", e=map.end!=null?toISO(row[map.end]):"";
+      if(!s&&!e){ const t2=today(); s=iso(t2); e=iso(addDays(t2,7)); } else if(!e) e=s; else if(!s) s=e;
+      if(s&&e&&parse(e)<parse(s)){ e=s; warnings.push(`แถว ${rowNo}: วันสิ้นสุดก่อนวันเริ่ม — ปรับให้เท่ากัน`); }
+      const f={id:mkId(map.nodeid!=null?row[map.nodeid]:"",rowNo),kind:"feature",fid:cell(row,"fid"),name,description:cell(row,"description"),start:s,end:e,status:map.status!=null?statusFromText(row[map.status]):"not_started",remark:cell(row,"remark"),custom:{}};
+      cols.forEach(cd=>{ const cv=String(row[cd.col]??"").trim(); if(cv!=="") f.custom[cd.id]=cv; });   // skip empty cells → a sparse feature stays sparse, so a lossless re-import is a true no-op (finding: densifying custom maps burned an undo slot + cloud-pushed a "changed" doc)
+      cont.children.push(f);
+    }
+  }
+  return makeImportResult(roots, cols, warnings);
+}
+/* Legacy flat parse (kept, R-E3d) — one upgrade: a Module cell with the " › " separator now
+   nests into containers instead of becoming one literally-named module. */
+function parseLegacy(aoa, hdr){
+  const P=proj(), {map,cols}=resolveHeaders(hdr.headers, matchKey, P);
+  if(map.name==null){ toast("ต้องมีคอลัมน์ Feature/ชื่อ"); return null; }
+  const warnings=[], roots=[], byPath=new Map();
+  const getCont=parts=>{ let parent=null, acc="", cont=null; parts.forEach((part,idx)=>{ acc+=(idx?" › ":"")+part; let c=byPath.get(acc); if(!c){ c={id:nid(),kind:"container",name:part,description:"",color:byPath.size%PALETTE.length,collapsed:false,children:[]}; byPath.set(acc,c); (parent?parent.children:roots).push(c); } parent=c; cont=c; }); return cont; };
+  for(let i=hdr.hi+1;i<aoa.length;i++){
+    const row=aoa[i]; if(!row||row.every(c=>String(c).trim()==="")) continue;
+    const rowNo=i+1, name=String(row[map.name]).trim(); if(!name) continue;
+    const modRaw=(map.module!=null?String(row[map.module]).trim():"")||"Imported";
+    const parts=modRaw.split(" › ").map(x=>x.trim()).filter(Boolean); if(!parts.length) parts.push("Imported");
+    const cont=getCont(parts);
     let s=map.start!=null?toISO(row[map.start]):"", e=map.end!=null?toISO(row[map.end]):"";
     if(!s&&!e){ const t=today(); s=iso(t); e=iso(addDays(t,7)); } else if(!e) e=s; else if(!s) s=e;
+    if(s&&e&&parse(e)<parse(s)){ e=s; warnings.push(`แถว ${rowNo}: วันสิ้นสุดก่อนวันเริ่ม — ปรับให้เท่ากัน`); }
     const f={id:nid(),kind:"feature",fid:map.fid!=null?String(row[map.fid]).trim():"",name,description:map.description!=null?String(row[map.description]).trim():"",start:s,end:e,status:map.status!=null?statusFromText(row[map.status]):"not_started",remark:map.remark!=null?String(row[map.remark]).trim():"",custom:{}};
-    customDefs.forEach(cd=> f.custom[cd.id]=String(row[cd.col]??"").trim());
-    if(!groups.has(modName)) groups.set(modName,[]); groups.get(modName).push(f);
+    cols.forEach(cd=>{ const cv=String(row[cd.col]??"").trim(); if(cv!=="") f.custom[cd.id]=cv; });   // skip empty cells → sparse custom map stays sparse (finding: idempotent round-trip)
+    cont.children.push(f);
   }
-  const P=proj();
-  P.customCols=customDefs.map(({id,label,w,kind})=>({id,label,w,kind}));
-  P.colOrder=DEFAULT_ORDER.concat(P.customCols.map(c=>"c:"+c.id));
-  P.modules=[]; let ci=0;
-  // import stays flat (path strings arrive as container names; no round-trip parsing) — build root containers
-  groups.forEach((feats,name)=>{ P.modules.push({id:nid(),kind:"container",name,description:"",color:ci++%PALETTE.length,collapsed:false,children:feats}); });
-  P.docVer=2; P.progressOrder=P.modules.map(m=>m.id);
-  normalizeTree(P); Store.save(); renderTab(ui.tab);
-  toast(`นำเข้าแล้ว: ${P.modules.length} โมดูล · ${[...groups.values()].reduce((a,b)=>a+b.length,0)} ฟีเจอร์`);
+  return makeImportResult(roots, cols, warnings);
+}
+function findImportHeader(aoa){
+  const N=Math.min(aoa.length,8);
+  for(let i=0;i<N;i++){ const ks=new Set(); (aoa[i]||[]).forEach(c=>{ const k=matchStructKey(c); if(k) ks.add(k); }); if(ks.has("type")&&ks.has("level")&&ks.has("name")) return {mode:"structured",hi:i,headers:aoa[i]}; }  // §4.3: Type AND Level AND Name → structured
+  for(let i=0;i<N;i++){ if((aoa[i]||[]).filter(c=>matchKey(c)).length>=2) return {mode:"legacy",hi:i,headers:aoa[i]}; }
+  return null;
+}
+function parseWorkbook(buf){
+  const wb=XLSX.read(buf,{type:"array"}), names=wb.SheetNames||[];
+  if(!names.length){ toast("ไม่พบชีตข้อมูลในไฟล์"); return null; }
+  // §4.2/§4.3: prefer the sheet literally named "Timeline" (case-insensitive), THEN scan every remaining sheet
+  // for a detectable header — so a user who reorders tabs (drags Info first) or inserts a scratch sheet still
+  // re-imports a valid backup instead of hitting "ไม่พบหัวคอลัมน์ที่รองรับ" on sheet 0 (finding). Info's
+  // label/value rows never detect (no Type/Level/Name, <2 legacy aliases), so the fallback stays safe.
+  const pref=names.find(n=>String(n).trim().toLowerCase()==="timeline");
+  const order=pref?[pref,...names.filter(n=>n!==pref)]:names;
+  let aoa=null, hdr=null;
+  for(const nm of order){
+    const s=wb.Sheets[nm]; if(!s) continue;
+    const a=XLSX.utils.sheet_to_json(s,{header:1,raw:true,defval:""});
+    const h=findImportHeader(a);
+    if(h){ aoa=a; hdr=h; break; }
+  }
+  if(!hdr){ toast("ไม่พบหัวคอลัมน์ที่รองรับ"); return null; }
+  return hdr.mode==="structured" ? parseStructured(aoa,hdr) : parseLegacy(aoa,hdr);
+}
+/* Parse result — a plain payload with a deferred build(): NO doc mutation until confirm.
+   build() applies EVERYTHING as ONE mutation with ONE Store.save (E2 → exactly one undo step). */
+function makeImportResult(roots, cols, warnings){
+  let mods=0, feats=0; walkTree(roots, n=>{ if(!n) return; n.kind==="container"?mods++:feats++; });
+  // §4.3 "missing labels → dropped (with preview warning)": an EXISTING custom column absent from the
+  // imported sheet is removed by build() (customCols is replaced) — name it in the preview so the drop
+  // is a decision, never a surprise. Label match mirrors resolveHeaders (trim, case-sensitive).
+  const have=new Set(cols.map(c=>String(c.label).trim()));
+  const P0=proj();
+  const dropped=((P0&&P0.customCols)||[]).filter(c=>!have.has(String(c.label).trim())).map(c=>c.label);
+  return {
+    mods, feats, warnings, dropped,
+    customsNew: cols.filter(c=>!c.reused).map(c=>c.label),
+    customsReused: cols.filter(c=>c.reused).map(c=>c.label),
+    build(){
+      const P=proj(); if(!P) return;
+      // R-E3b carry-over by Node ID: an imported container matching an existing one inherits the fields
+      // the sheet does NOT carry — kpi / hideProgress / collapsed. progressOrder is left as-is (self-heals).
+      const old=new Map(); walkTree(P.modules, n=>{ if(n&&n.kind==="container") old.set(n.id,n); });
+      walkTree(roots, n=>{ if(n&&n.kind==="container"){ const o=old.get(n.id); if(o){ if(o.kpi&&typeof o.kpi==="object") n.kpi=JSON.parse(JSON.stringify(o.kpi)); if("hideProgress" in o) n.hideProgress=o.hideProgress; n.collapsed=!!o.collapsed; } } });
+      P.customCols=cols.map(c=>({id:c.id,label:c.label,w:c.w,kind:c.kind}));
+      const reused=cols.filter(c=>c.reused).map(c=>"c:"+c.id), fresh=cols.filter(c=>!c.reused).map(c=>"c:"+c.id), oldOrder=P.colOrder||[];
+      reused.sort((a,b)=>{ const ia=oldOrder.indexOf(a), ib=oldOrder.indexOf(b); return (ia<0?1e9:ia)-(ib<0?1e9:ib); });   // keep existing order for reused cols, append new
+      P.colOrder=DEFAULT_ORDER.concat(reused, fresh);
+      P.modules=roots; P.docVer=2;
+      normalizeTree(P); Store.save(); renderTab(ui.tab);                     // ONE mutation → ONE Store.save → ONE undo step
+    },
+  };
+}
+/* §4.4 import preview — parse FIRST, show counts + custom summary + up to ~8 warnings + the hard-truth
+   line, then replace on confirm (E2 makes it recoverable in one step). Cancel → doc untouched. */
+function openImportPreview(res){
+  const shown=res.warnings.slice(0,8), more=res.warnings.length-shown.length;
+  const colParts=[];
+  if(res.customsReused.length) colParts.push(`ใช้คอลัมน์เดิม: ${res.customsReused.map(l=>`<span class="tag">${esc(l)}</span>`).join("")}`);
+  if(res.customsNew.length) colParts.push(`คอลัมน์ใหม่: ${res.customsNew.map(l=>`<span class="tag new">${esc(l)}</span>`).join("")}`);
+  if(res.dropped && res.dropped.length) colParts.push(`คอลัมน์เดิมที่จะถูกลบ (ไม่มีในไฟล์): ${res.dropped.map(l=>`<span class="tag drop">${esc(l)}</span>`).join("")}`);
+  const warnHtml=res.warnings.length ? `<ul class="impWarns">${shown.map(w=>`<li>${esc(w)}</li>`).join("")}${more>0?`<li class="more">…และอีก ${more} รายการ</li>`:""}</ul>` : "";
+  openModal(`
+    <h2>ตรวจสอบการนำเข้า</h2>
+    <div class="msub">ตรวจสอบก่อนแทนที่โครงสร้างของโครงการ</div>
+    <div class="impPrev">
+      <div class="impCounts">นำเข้า: <b>${res.mods}</b> โมดูล · <b>${res.feats}</b> ฟีเจอร์</div>
+      ${colParts.length?`<div class="impCols">${colParts.join(" · ")}</div>`:""}
+      ${warnHtml}
+      <div class="impHard">การนำเข้าจะแทนที่โครงสร้างปัจจุบันทั้งหมดของโครงการนี้ (เลิกทำได้ 1 ขั้น)</div>
+    </div>
+    <div class="modActsRow"><button class="btn" id="imp_cancel">ยกเลิก</button><button class="btn dangerPrimary" id="imp_confirm">นำเข้าแทนที่</button></div>`);
+  el("imp_cancel").onclick=()=>{ const fi=el("fileInput"); if(fi) fi.value=""; closeModal(); };                       // Cancel → doc untouched, file input reset
+  el("imp_confirm").onclick=()=>{ res.build(); closeModal(); toast(`นำเข้าแล้ว: ${res.mods} โมดูล · ${res.feats} ฟีเจอร์`); };
+}
+function importWorkbook(buf){
+  if(typeof XLSX==="undefined"){ toast("ไลบรารี Excel โหลดไม่สำเร็จ"); return; }
+  let res; try{ res=parseWorkbook(buf); }catch(err){ console.error(err); toast("อ่านไฟล์ไม่สำเร็จ — ตรวจหัวคอลัมน์อีกครั้ง"); return; }
+  if(!res) return;                                                                                                    // detection/validation failed (already toasted)
+  if(res.mods===0 && res.feats===0){ toast(res.warnings[0] || "ไม่พบข้อมูลที่นำเข้าได้ — ตรวจไฟล์อีกครั้ง"); return; }   // R-E3c: zero yield → toast, NO modal
+  openImportPreview(res);
 }
 
 /* =====================  PNG EXPORT  ===================== */
@@ -2601,13 +2902,14 @@ function notesUiHighlight(){                                                    
 Store.load();
 applyTheme();                                          // §1.10: stamp html[data-theme] from ui.theme BEFORE the first render (no light→dark flash)
 route();
+_histBase = JSON.stringify(DB);                        // FIX (audit E2/§3): the FIRST render performs lazy doc-completion (normalizeProgressOrder + per-module kpi + notes[pid] init) that Store.load's _histBase — captured BEFORE any render — doesn't yet reflect. Re-base to the just-rendered doc so the first no-op save (the summary→timeline autosave, or a splitter click before any real edit) doesn't capture that normalization as a phantom undo step. History base only — no mutation, no save, stacks stay empty.
 wireDragGuard();                                       // one centralized capture-phase pointerdown/up/cancel guard for background-sync deferral
 wireResizeGuard();                                     // H2: one debounced window-resize listener → refreshes the months-in-view readout (no re-render)
 wireThemeGuard();                                      // §1.10: AUTO mode re-applies the effective theme when the OS prefers-color-scheme flips (wired once)
 wirePrintGuard();                                      // §1.10 T2: force light + re-render inline bar fills on beforeprint, restore on afterprint (wired once; covers the Print button AND Cmd-P)
 window.addEventListener('hashchange', route);
 window.addEventListener('storage', e=>{ if(e.key===LS_KEY && !editingNow()){ Store.load(); route(); } }); // FIX: don't reload/re-render from a cross-tab write while a drag/resize or edit is in flight
-if(cloudOn()){ cloudSync(); window.addEventListener('focus', ()=>cloudPull(false)); setInterval(()=>cloudPull(false), 30000); }
+if(cloudOn()){ cloudSync(); wireSyncGuard(); } // §5: visibility-aware 5s polling + focus-pull + flush-on-exit (replaces the fixed 30s setInterval)
 document.addEventListener('keydown', e=>{
   if(e.key==="Escape"){
     if(el("modalRoot").style.display==="block") closeModal();
@@ -2620,5 +2922,14 @@ document.addEventListener('keydown', e=>{
       // later move-away + re-hover opens it again.
       document.querySelectorAll('.gripMenu:hover').forEach(gm=>{ gm.classList.add('gmSuppress'); gm.addEventListener('pointerleave', ()=>gm.classList.remove('gmSuppress'), {once:true}); });
     }
+    return;
+  }
+  // E2: ⌘Z / Ctrl+Z → undo · ⇧⌘Z / Ctrl+Y → redo. editingNow() SUPPRESSES the shortcut in inputs/
+  // textarea/contenteditable, while notes or any modal/overlay is open, and mid-drag — the browser's
+  // native text-undo must win there (R-E2 §3). preventDefault only when the app actually handles the key.
+  if((e.metaKey||e.ctrlKey) && !e.altKey){
+    const k=e.key.toLowerCase();
+    if(k==="z"){ if(editingNow()) return; e.preventDefault(); e.shiftKey?redo():undo(); }
+    else if(k==="y"){ if(editingNow()) return; e.preventDefault(); redo(); }   // Ctrl+Y (Windows redo)
   }
 });

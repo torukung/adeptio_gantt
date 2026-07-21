@@ -1,5 +1,111 @@
 # Changelog
 
+## v1.0.6 — 2026-07-21 — Drag-date tip, Sub-Module shortcut, undo/redo, spreadsheet round-trip & live sync
+
+Five ToR-directed edits — scoped in `docs/SPEC_v1.0.6.md` (`9f40989`; E5 added mid-release on
+ToR's instruction, `d1bf9e8`) — land as five Fable-audited stages on the v1.0.5 baseline,
+`95bb8c5` → `7389b06`: a live **date readout** while dragging or resizing a bar, a one-click
+**Sub-Module** button on the grip menu, **5-step undo/redo**, a structured **spreadsheet
+round-trip** (Excel/Numbers/Google Sheets), and **live Cloudflare sync** — all client-side, the
+Worker API frozen throughout. Every stage passed a 5-lens adversarial audit before its fix
+worker touched anything, and the suite grew 177 → 223 tests along the way. The stored document
+shape does not change: `docVer` stays 2.
+
+### Feature — live date readout while dragging/resizing (E1, `f4600cc`)
+
+- **Drag/resize tooltip.** Dragging a bar or an edge now shows a floating tip with the live
+  date(s) instead of nothing until drop — move mode shows both dates plus the inclusive
+  duration, edge-resize shows a bold moving-edge date over a dimmer context date (BE-aware
+  `fmtThai` formatting, a new `.floatTip.dragDates` accent class on the existing tip singleton);
+  hover tooltips now yield to the drag readout instead of fighting it.
+- **Audit catch.** A genuine `pointercancel` never ran `onBarUp`, so the drag latch could stick
+  forever — a latent v1.0.5 bug the new hover guards would have turned into permanently-dead
+  tooltips. Fixed so a cancelled drag now fully tears down and snaps the bar back rather than
+  committing the cancelled position. Tests: `dragtip-v106.spec.js` (6). Full suite 183 green.
+
+### Feature — Sub-Module shortcut on the grip menu (E5, `b429855`)
+
+- **New `เพิ่มโมดูลย่อยในโมดูลนี้` grip-menu button**, container rows only, placed right after
+  the existing ＋ add-feature button. Opens the existing Create-Module modal pre-set to
+  Sub-Module with the clicked container preselected as parent (the parent dropdown still lists
+  every container, as before); the plain topbar Module button behaves exactly as before. Added
+  to spec mid-release on ToR's instruction and built alongside the original four edits.
+- **Audit.** 4 of 5 lenses came back clean (the safety lens was re-run after a network-outage
+  timeout interrupted the first pass, clean on rerun); 1 confirmed minor — a reveal-after-save
+  test assertion was vacuously true until fixed to collapse the parent module first. Tests:
+  `submodmenu-v106.spec.js` (8). Full suite 191 green.
+
+### Feature — 5-step undo/redo (E2, `6b8beb4`)
+
+- **Whole-document snapshots, capped at 5, session-only**, riding `Store.save()`'s existing
+  serialization. `⌘Z`/`Ctrl+Z` undoes, `⇧⌘Z`/`Ctrl+Y` redoes — suppressed while typing, inside
+  the notes popup, mid-drag, or with any modal open, so native text-undo wins there instead. A
+  restore deliberately bypasses the last-edit stamp and pushes the (older) document to the cloud
+  when sync is on — undo propagating via last-write-wins is by design, not a bug.
+- **Audit — 3 confirmed, all 3/3 judge votes.** Both `Store.load()` and `adoptRemote()` now
+  clear the undo/redo stacks on any externally-sourced document (cross-tab, cloud poll, or
+  seed), so an undo can never silently clobber another tab or device's write; a dirty-check
+  guard stops the v1.0.5 last-edit stamp from eating an undo slot on every benign autosave; the
+  dashboard delete-confirm no longer claims the delete is irreversible, now reading
+  `...(เลิกทำได้ 1 ขั้น)`. Tests: `undo-v106.spec.js` (10). Full suite 201 green.
+
+### Feature — structured spreadsheet round-trip (E3, `43c26ba`)
+
+- **Export now writes the full tree**, one row per node at any depth on a `Timeline` sheet plus
+  a read-only `Info` sheet, replacing the old lossy flat export. **Import previews before it
+  mutates anything** — counts, a custom-column summary, row-numbered warnings — and commits
+  through exactly one save, so a lossless re-import spends no undo slot; an orphan feature (no
+  container above it) lands in an auto **(นำเข้า)** recovery container at root.
+- **Audit — 8 confirmed**, most consequential: a feature's `Level` is now honored on import, so
+  a feature after a sibling sub-container no longer silently re-nests — this had been breaking
+  the export→reimport round-trip the feature exists to guarantee. Also fixed: custom columns
+  whose header collides with a reserved name now fall through instead of being silently
+  dropped, and the `Timeline` sheet is found by name so a reordered-tabs workbook still imports.
+  Tests: `roundtrip-v106.spec.js` (11). Full suite 212 green.
+
+### Feature — live Cloudflare sync (E4, `7389b06`)
+
+- **Faster push, visibility-aware pull, client-side only.** Push debounce cut 800ms → 250ms
+  with single-flight, generation-counted PUTs; poll changed from an unconditional 30s to 5s
+  while the tab is visible and zero while hidden, with an immediate catch-up pull on refocus; a
+  keepalive flush fires on tab close/hide (falling back to a normal fetch above 60,000 bytes) so
+  the last edit isn't lost. New sync-status chip (กำลังซิงก์.../ซิงก์แล้ว HH:mm/ออฟไลน์...) on
+  the dashboard and project topbar; a background-adopted update now toasts once
+  (`อัปเดตจากเครื่องอื่นแล้ว`). `worker.js` itself is untouched.
+- **Audit — 5 confirmed, 1 major.** The sync chip could flip to synced while a push was still in
+  backoff (false-green); fixed to hold the กำลังซิงก์... label until the push actually lands.
+  Also closed: a mid-flight-edit lost-edit race (now serialized and re-pushed via the generation
+  counter, never dropped) and duplicate exit-flush PUTs on a real tab close. Tests:
+  `livesync-v106.spec.js` (11, mock-only, its own fail-closed fixture, zero real requests across
+  ×3 runs). Full suite 223 green.
+
+### Compatibility — zero doc-schema change
+
+- **`docVer` stays 2, no new document keys** — verified by diff, not just asserted: the only
+  `docVer`-touching lines in the whole branch are a same-value relocation inside E3's import
+  rebuild, and a repo-wide check finds no new top-level `DB.<key>=` assignment anywhere in
+  `app.js`. E1 is pure UI; E2's undo/redo lives in session-only JS variables, never serialized
+  into the doc; E3 changes the external `.xlsx` layout, not the in-app document; E4 is push/pull
+  timing only; E5 reuses the existing save path unmodified apart from one optional argument.
+- **Protected files stay zero-diff** — `worker.js`, `schema.sql`, `wrangler.toml`, `index.html`,
+  `cloudflare/`, `preview/`, `CNAME` are all untouched across the whole branch (`95bb8c5` →
+  `7389b06`); only `app.js`, `styles.css`, `docs/SPEC_v1.0.6.md`, and 6 files under `tests/`
+  changed. Unlike the v1.0.4→v1.0.5 transition, where a stale v1.0.4 tab could drop `DB.notes`
+  outright by pushing a doc that never had it, a stale v1.0.5 tab here can't drop any v1.0.6
+  field, because none were added — ordinary content-overwrite LWW risk is unchanged, so close
+  old tabs before editing in the new build regardless; that rule doesn't change.
+
+### Testing
+
+- **223 Playwright tests, up from 177 at the v1.0.5 branch point** — 46 new tests across the
+  five spec files above, growing stage by stage: 177 → 183 (E1, +6) → 191 (E5, +8) → 201 (E2,
+  +10) → 212 (E3, +11) → 223 (E4, +11); independently recounted from source, not just trusted
+  from each commit message. Every browser context still blocks the production Worker host
+  before any page script runs; `livesync-v106.spec.js` is the one file that has to simulate a
+  working sync, so it carries its own fail-closed fixture pair instead (auto-abort + an opt-in
+  mock, every mocked response tagged `x-mock: 1`) — hardened as an audit fix in the same E4
+  commit.
+
 ## v1.0.5 — 2026-07-19 — Last-edit timestamps, Project NOTEs, mirror removal
 
 A fix-first minor release: the v1.0.4 compatibility mirror is retired, every doc mutation now
