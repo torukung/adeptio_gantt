@@ -134,6 +134,19 @@ button{font-family:inherit; cursor:pointer;}
 .brand .meta{font-family:var(--mono); font-size:11px; color:var(--ink-faint); margin-top:1px;}
 .toolgroup{display:flex; align-items:center; gap:7px; flex-wrap:wrap;}
 .toolgroup .gl{font-family:var(--mono); font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint);}
+/* E4 (§5): live-sync status chip — dashboard bar + project topbar. Direct-DOM-patched by
+   setSyncState()/paintSyncChip(); hidden entirely when cloud is off. Both themes via tokens;
+   the pulse respects prefers-reduced-motion. */
+.syncChip{display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 11px 0 9px; border:1px solid var(--line-strong); background:#fff; border-radius:var(--r-pill); font-family:var(--font-body); font-size:11.5px; font-weight:500; color:var(--ink-soft); white-space:nowrap;}
+.syncChip .scDot{width:7px; height:7px; border-radius:50%; background:var(--ink-faint); flex:0 0 auto;}
+.syncChip.synced{color:var(--ink-soft);}
+.syncChip.synced .scDot{background:var(--good);}
+.syncChip.syncing{color:var(--primary-ink); border-color:var(--primary-soft);}
+.syncChip.syncing .scDot{background:var(--violet-adpt); animation:scPulse 1.15s var(--ease) infinite;}
+.syncChip.offline{color:var(--ink-faint);}
+.syncChip.offline .scDot{background:var(--today);}
+@keyframes scPulse{ 0%,100%{opacity:1; transform:scale(1);} 50%{opacity:.35; transform:scale(.62);} }
+@media (prefers-reduced-motion:reduce){ .syncChip.syncing .scDot{animation:none;} }
 
 /* ---- project tab nav (Status & Summary | Timeline) ---- */
 .tabNav{display:flex; align-items:center; gap:6px; flex-wrap:wrap;}
@@ -660,6 +673,7 @@ button{font-family:inherit; cursor:pointer;}
   html[data-theme="dark"] .colHead .colTool,
   html[data-theme="dark"] .btn.danger,
   html[data-theme="dark"] .btn.details.gray{ background:var(--ctl); }
+  html[data-theme="dark"] .syncChip{ background:var(--ctl); }   /* E4: dark chip ground (dot colours + text adapt via tokens; syncing border stays --primary-soft) */
 
   /* native date pickers / selects → dark (the light rules force color-scheme:light) */
   html[data-theme="dark"] .sumDateWrap input[type=date],

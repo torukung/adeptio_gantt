@@ -269,6 +269,34 @@ function undoGroupHtml(){                                  // shared markup for 
 
 /* ---- cloud sync engine: local-first; the Worker's `rev` is the tiebreaker ---- */
 let pushTimer=null, pushPending=false, pushFails=0;
+/* findings 6/7: serialize whole-doc pushes + track a push "generation" so (a) the 250ms debounce can't
+   fan out into overlapping out-of-order PUTs, and (b) a completing push never clears the latch out from
+   under a newer edit queued mid-flight (which a 5s poll could otherwise adopt over and silently drop). */
+let _pushGen=0, _pushInFlight=false;
+/* ---- E4 (§5) live-sync UI state: the sync-status chip + visibility-aware polling. Session-only. ---- */
+let lastSyncAt=0, _syncState='syncing';                 // chip label time + current visual state: 'syncing' | 'synced' | 'offline'
+const POLL_MS_VISIBLE=5000;                             // §5: visible-tab poll cadence (a hidden tab does NOT poll)
+let _pollTimer=null, _syncGuardWired=false, _flushed=false; // _flushed: one-shot latch so the two exit events (findings 1/5/9) flush at most once
+function fmtHM(ts){ const d=new Date(ts); const p2=n=>String(n).padStart(2,"0"); return p2(d.getHours())+":"+p2(d.getMinutes()); } // local HH:mm (fmtStamp p2-style)
+function setSyncState(state){                            // §5: the ONE chip driver — schedulePush / cloudPush ok·fail / cloudPull / visibility handlers call it
+  if(state==='synced' && (pushPending || pushFails>0))  // R-E4c + finding 3: a push is still OWED — latched in-flight (pushPending) OR a retry is armed after a failed push (pushFails>0). The chip must never imply the reassuring green 'synced' safety it does not have (e.g. a good GET during PUT backoff must NOT flip it green while the edit is still un-pushed).
+    state = pushPending ? 'syncing' : 'offline';
+  if(state==='synced') lastSyncAt=Date.now();           // stamp the moment of a GENUINE success only (nothing owed): push ok OR up-to-date poll
+  _syncState=state; paintSyncChip();
+}
+function paintSyncChip(){                                // DIRECT DOM patch (like refreshStamps) — never a re-render
+  document.querySelectorAll('#syncChip').forEach(chip=>{
+    if(!cloudOn()){ chip.style.display='none'; return; } // §5: chip hidden entirely when cloud is off
+    chip.style.display='';
+    const st=_syncState||'syncing';
+    chip.className='syncChip '+st;                       // drives dot colour + pulse via styles.css
+    const lbl=chip.querySelector('.scLabel');
+    if(lbl) lbl.textContent = st==='syncing' ? 'กำลังซิงก์…'
+      : st==='offline' ? 'ออฟไลน์ · จะซิงก์อัตโนมัติ'
+      : ('ซิงก์แล้ว ' + (lastSyncAt ? fmtHM(lastSyncAt) : ''));
+  });
+}
+function syncChipHtml(){ return `<span id="syncChip" class="syncChip syncing"${cloudOn()?"":' style="display:none"'}><span class="scDot"></span><span class="scLabel">กำลังซิงก์…</span></span>`; } // shared markup for both surfaces (dashboard bar + project topbar)
 /* Centralized drag guard (replaces the old per-handler interaction latch): while ANY
    pointer drag/resize is in flight, background cloud/storage sync must NOT re-render
    or adopt a remote doc (that would corrupt the drag). ONE capture-phase pointerdown
@@ -296,19 +324,30 @@ function wireResizeGuard(){                                                     
   if(_resizeGuardWired) return; _resizeGuardWired=true;
   window.addEventListener('resize', ()=>{ clearTimeout(_resizeT); _resizeT=setTimeout(()=>{ if(el("rightScroll")) syncZoomUI(); }, 150); }); // debounced ~150ms; readout refresh ONLY when the timeline is present
 }
-function schedulePush(){ pushPending=true; clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, 800); }
-async function cloudPush(){
+function schedulePush(){ pushPending=true; _pushGen++; clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, 250); setSyncState('syncing'); } // §5: 250ms debounce (burst-coalesced; a drag commit stays one push) + chip → syncing. _pushGen bumps on each edit so a completing push can tell whether newer work was queued mid-flight (findings 6/7)
+async function cloudPush(opts){
   if(!cloudOn()) return;
+  const keepalive=!!(opts && opts.keepalive);
+  if(_pushInFlight && !keepalive) return;            // finding 7: at most ONE normal whole-doc PUT in flight — the 250ms debounce can't spawn overlapping out-of-order writes. A keepalive flush is exempt: it is the tab-close survivor and must always go out.
+  const gen=_pushGen;                                // finding 6: the generation this PUT persists; compared on completion
+  if(!keepalive) _pushInFlight=true;
+  const body=JSON.stringify({doc:DB});
+  const init={ method:"PUT", headers:apiHeaders(), body };
+  if(keepalive && body.length<=60000) init.keepalive=true; // R-E4a: flush the last edit past tab close/hide; keepalive bodies cap ~64KB → above 60000 fall back to a normal fetch (may be dropped on close — accepted; localStorage still holds the doc + next open re-pushes)
   try{
-    const res = await fetch(apiUrl("/api/state"), { method:"PUT", headers:apiHeaders(), body:JSON.stringify({doc:DB}) });
-    if(res.ok){ const j=await res.json(); if(j && typeof j.rev==="number") setLsRev(j.rev); pushPending=false; pushFails=0; return; }
+    const res = await fetch(apiUrl("/api/state"), init);
+    if(!keepalive) _pushInFlight=false;
+    if(res.ok){ const j=await res.json(); if(j && typeof j.rev==="number") setLsRev(j.rev); pushFails=0;
+      if(!keepalive && gen!==_pushGen){ clearTimeout(pushTimer); setSyncState('syncing'); return cloudPush(); } // finding 6/7: a newer edit landed while this PUT was in flight → push it NOW (the latch stays set, so a 5s poll can't adopt a remote over the still-un-pushed edit and drop it); coalesces the burst into one trailing push
+      pushPending=false; setSyncState('synced'); return; } // §5: successful push, nothing newer owed → chip synced HH:mm
     onPushFail();                                    // FIX: server rejected → clear latch + backoff retry (never leave pushPending stuck)
-  }catch(e){ onPushFail(); }                          // FIX: offline/blocked → clear latch + backoff retry
+  }catch(e){ if(!keepalive) _pushInFlight=false; onPushFail(); } // FIX: offline/blocked → clear latch + backoff retry
 }
-function onPushFail(){                                // FIX: clearing pushPending stops a failed push from permanently blocking cloudPull adoption
-  pushPending=false;
+function onPushFail(){                                // FIX: clearing pushPending stops a failed push from permanently blocking cloudPull adoption; the chip stays honest via setSyncState's pushFails>0 guard (finding 3), so a good GET during backoff can't paint it green while the edit is still owed
+  pushPending=false;                                 // NOTE: _pushInFlight is cleared by cloudPush's own !keepalive paths before we get here — onPushFail must NOT touch it (a keepalive flush failing must not release a concurrent normal push's serialization latch)
   const delay=Math.min(5000*(1<<Math.min(pushFails++,4)), 60000);
   clearTimeout(pushTimer); pushTimer=setTimeout(cloudPush, delay);
+  setSyncState('offline');                            // §5: failed push → chip offline (cleared only by the next genuine success)
 }
 function editingNow(){
   if(_dragging) return true;                  // never adopt a remote doc while a drag/resize is in flight
@@ -319,18 +358,21 @@ function editingNow(){
   if(notesOpen()) return true;                 // v1.0.5 F2 (N5): never adopt a remote doc / re-render while the notes popup is open
   return false;
 }
-function adoptRemote(doc, rev){ DB=doc; migrateDB(DB); MEM=DB; const s=JSON.stringify(DB); safeSet(s); setLsRev(rev); undoStack.length=0; redoStack.length=0; _histBase=s; route(); updateUndoUI(); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent). R-E2a: adopting another device's write CLEARS undo history + rebases _histBase to the adopted doc — undoing across it would silently clobber their work via LWW
+function adoptRemote(doc, rev, announce){ DB=doc; migrateDB(DB); MEM=DB; const s=JSON.stringify(DB); safeSet(s); setLsRev(rev); undoStack.length=0; redoStack.length=0; _histBase=s; route(); updateUndoUI(); if(announce) toast("อัปเดตจากเครื่องอื่นแล้ว"); } // migrate a possibly-v1 remote doc BEFORE persisting/rendering (idempotent). R-E2a: adopting another device's write CLEARS undo history + rebases _histBase to the adopted doc — undoing across it would silently clobber their work via LWW. R-E4b: `announce` toasts ONLY for a background/focus-pull adopt (never the initial seed or a manual restore)
 async function cloudPull(force){
   if(!cloudOn()) return false;
   try{
     const res = await fetch(apiUrl("/api/state"), { headers:apiHeaders() });
-    if(!res.ok) return false;
+    if(!res.ok){ setSyncState('offline'); return false; }
     const j = await res.json();
+    let adopted=false, newerDeferred=false;
     if(j && j.doc && typeof j.rev==="number"){
-      if(force || (j.rev > lsRev() && !pushPending && !editingNow())){ adoptRemote(j.doc, j.rev); return true; }
+      if(force || (j.rev > lsRev() && !pushPending && !editingNow())){ adoptRemote(j.doc, j.rev, !force); adopted=true; } // R-E4b: a background/focus pull (force=false) announces; a forced manual restore stays silent
+      else if(j.rev > lsRev()) newerDeferred=true;     // finding 4: a strictly-newer remote we did NOT adopt (deferred by editingNow()/pushPending) — we are NOT up to date, so this poll is not a 'synced' tick
     }
-    return false;
-  }catch(e){ return false; }
+    if(!newerDeferred) setSyncState('synced');         // finding 4: 'synced' only when the poll adopted OR was already up-to-date; a known-newer deferred remote leaves the chip as-is (never a false-green while sitting on a stale doc). R-E4c guard still demotes to 'syncing' when a push is pending.
+    return adopted;
+  }catch(e){ setSyncState('offline'); return false; }
 }
 async function cloudSync(){
   if(!cloudOn()) return;
@@ -339,13 +381,27 @@ async function cloudSync(){
     if(res.ok){
       const j = await res.json();
       if(j && j.doc){                                  // server already has data
-        if(j.rev > lsRev() || !safeGet()){ adoptRemote(j.doc, j.rev); toast("ซิงก์ข้อมูลจากคลาวด์แล้ว"); }
-        else cloudPush();                              // local is ahead/equal → push up
+        if(j.rev > lsRev() || !safeGet()){ adoptRemote(j.doc, j.rev); toast("ซิงก์ข้อมูลจากคลาวด์แล้ว"); setSyncState('synced'); } // initial seed adopt — NOT a cross-device announce (R-E4b)
+        else cloudPush();                              // local is ahead/equal → push up (cloudPush drives the chip)
       } else {
         cloudPush();                                   // server empty → seed it from local
       }
-    }
-  }catch(e){ /* offline → localStorage only */ }
+    } else setSyncState('offline');
+  }catch(e){ setSyncState('offline'); /* offline → localStorage only */ }
+}
+/* ---- E4 live-sync wiring: visibility-aware polling + flush-on-exit. Wired ONCE (like wireDragGuard). ---- */
+function startPoll(){ if(_pollTimer) return; _pollTimer=setInterval(()=>cloudPull(false), POLL_MS_VISIBLE); } // visible tab: poll every 5s
+function stopPoll(){ if(_pollTimer){ clearInterval(_pollTimer); _pollTimer=null; } }                          // hidden tab: no polling
+function flushOnExit(){ if(_flushed || !pushPending) return; _flushed=true; clearTimeout(pushTimer); cloudPush({keepalive:true}); } // R-E4a: fire the pending push immediately so the last edit survives tab close/switch. Findings 1/5/9: ONE-SHOT — a real tab close fires BOTH visibilitychange→hidden AND pagehide back-to-back, and cloudPush is async (pushPending isn't cleared synchronously), so an unguarded flush would issue a SECOND identical ~59KB PUT + rev bump to prod. The latch collapses it to a single flush.
+function wireSyncGuard(){
+  if(_syncGuardWired) return; _syncGuardWired=true;
+  window.addEventListener('focus', ()=>cloudPull(false));                                                     // existing focus-pull, now double-wire-guarded
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.hidden){ stopPoll(); flushOnExit(); }                                                         // R-E4a + stop the cadence while hidden
+    else { _flushed=false; cloudPull(false); startPoll(); }                                                   // visible again: re-arm the one-shot flush for a later close, do an immediate catch-up pull + resume cadence
+  });
+  window.addEventListener('pagehide', flushOnExit);                                                           // R-E4a: last-chance flush on close/navigation
+  if(!document.hidden) startPoll();                                                                           // begin polling if we loaded visible
 }
 
 /* =====================  SEED DATA  ===================== */
@@ -557,7 +613,7 @@ function renderDashboard(){
           <button class="btn primary" id="btnNewProj">${IC.plus}<span>โครงการใหม่</span></button>
           <span class="count">${ps.length} โครงการ</span>
           <span class="grow"></span>
-          ${undoGroupHtml()}
+          ${undoGroupHtml()}${syncChipHtml()}
           <button class="btn" id="btnBackup">${IC.cloud}<span>สำรอง / กู้คืนข้อมูล</span></button>
         </div>
         <div class="grid">
@@ -585,6 +641,7 @@ function renderDashboard(){
     }
   });
   wireUndoButtons();                                   // E2: bind + refresh disabled state on the fresh dashboard DOM
+  paintSyncChip();                                      // E4: sync the chip to the current session state on the fresh DOM
 }
 
 function projectModal(id){
@@ -637,7 +694,7 @@ function renderProject(){
           <button data-theme-set="dark" title="มืด">มืด</button>
         </div>
       </div>
-      ${undoGroupHtml()}
+      ${undoGroupHtml()}${syncChipHtml()}
       <div class="toolgroup tlOnly">
         <span class="gl">Scroll</span>
         <div class="seg"><button id="colLeft" title="เลื่อนคอลัมน์ซ้าย">◀</button><span class="lbl">Cols</span><button id="colRight" title="เลื่อนคอลัมน์ขวา">▶</button></div>
@@ -747,6 +804,7 @@ function wireProjectControls(){
   const bd=el("btnDetails"); if(bd) bd.onclick=()=>{ const P=proj(); if(P.detailsUrl) window.open(P.detailsUrl,"_blank","noopener"); else detailsModal(); };
   const bde=el("btnDetailsEdit"); if(bde) bde.onclick=()=> detailsModal();
   wireUndoButtons();                                   // E2: bind + refresh disabled state on the fresh project topbar DOM
+  paintSyncChip();                                      // E4: sync the chip to the current session state on the fresh DOM
 }
 
 /* ----- vertical splitter: resize the column pane ----- */
@@ -2851,7 +2909,7 @@ wireThemeGuard();                                      // §1.10: AUTO mode re-a
 wirePrintGuard();                                      // §1.10 T2: force light + re-render inline bar fills on beforeprint, restore on afterprint (wired once; covers the Print button AND Cmd-P)
 window.addEventListener('hashchange', route);
 window.addEventListener('storage', e=>{ if(e.key===LS_KEY && !editingNow()){ Store.load(); route(); } }); // FIX: don't reload/re-render from a cross-tab write while a drag/resize or edit is in flight
-if(cloudOn()){ cloudSync(); window.addEventListener('focus', ()=>cloudPull(false)); setInterval(()=>cloudPull(false), 30000); }
+if(cloudOn()){ cloudSync(); wireSyncGuard(); } // §5: visibility-aware 5s polling + focus-pull + flush-on-exit (replaces the fixed 30s setInterval)
 document.addEventListener('keydown', e=>{
   if(e.key==="Escape"){
     if(el("modalRoot").style.display==="block") closeModal();
