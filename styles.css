@@ -470,6 +470,24 @@ button{font-family:inherit; cursor:pointer;}
 .swatch.on{border-color:var(--ink); box-shadow:0 0 0 2px #fff inset;}
 .modActsRow{display:flex; justify-content:flex-end; gap:9px; margin-top:18px;}
 
+/* E3 import preview (§4.4) — counts + custom summary + warnings + hard-truth line. Danger-primary
+   confirm reuses the brand ruby so "replace everything" reads as consequential. Both themes below. */
+.impPrev{margin:2px 0 2px;}
+.impCounts{font-family:var(--mono); font-size:13.5px; color:var(--ink); margin-bottom:11px;}
+.impCounts b{color:var(--violet-adpt); font-weight:700;}
+.impCols{font-size:12px; color:var(--ink-soft); margin-bottom:12px; line-height:1.9;}
+.impCols .tag{display:inline-block; font-family:var(--mono); font-size:11px; padding:1px 9px; border-radius:var(--r-pill); border:1px solid var(--line-strong); color:var(--ink-soft); margin:0 3px 2px 0;}
+.impCols .tag.new{color:var(--violet-adpt); border-color:var(--violet-adpt);}
+.impCols .tag.drop{color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); text-decoration:line-through;}  /* §4.3: existing custom column absent from the file — will be removed on confirm (token-driven, themes both ways) */
+.impWarns{list-style:none; margin:0 0 12px; padding:9px 12px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r-sm); max-height:190px; overflow:auto;}
+.impWarns li{font-size:12px; color:var(--ink-soft); padding:3px 0; display:flex; gap:8px; align-items:flex-start; line-height:1.45;}
+.impWarns li::before{content:"!"; flex:0 0 auto; width:16px; height:16px; margin-top:1px; border-radius:50%; background:rgba(255,171,64,.2); color:#b9740c; font-family:var(--mono); font-size:11px; font-weight:700; text-align:center; line-height:16px;}
+.impWarns .more{color:var(--ink-faint); font-style:italic;}
+.impWarns .more::before{visibility:hidden;}
+.impHard{font-size:12.5px; color:var(--ruby-adpt); background:rgba(255,74,123,.08); border:1px solid rgba(255,74,123,.28); border-radius:var(--r-sm); padding:9px 12px; line-height:1.5;}
+.btn.dangerPrimary{background:var(--ruby-adpt); border-color:var(--ruby-adpt); color:#fff;}
+.btn.dangerPrimary:hover{background:#e7396a; border-color:#e7396a; color:#fff;}
+
 /* module create — move-features picker (rows are <label>s inside .field; scope
    past the .field label rule so its uppercase/mono/block styling doesn't leak) */
 .mpList{max-height:200px; overflow:auto; border:1px solid var(--line-strong); border-radius:var(--r-md); background:#fff; padding:6px;}
@@ -716,6 +734,9 @@ button{font-family:inherit; cursor:pointer;}
   /* the two sibling #f3c2cf danger hovers (grip-menu delete pill + KPI-table row delete) — same idiom as .iconbtn.danger:hover */
   html[data-theme="dark"] .gripPill > button.gm.danger:hover{ background:rgba(255,74,123,.14); color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); }
   html[data-theme="dark"] .kc-x .pmDel:hover{ background:rgba(255,74,123,.14); color:var(--ruby-adpt); border-color:rgba(255,74,123,.5); }
+  /* E3 import-preview warning badge: light amber-on-cream → dark-legible amber (surface/panel/ruby tokens auto-theme) */
+  html[data-theme="dark"] .impWarns li::before{ background:rgba(255,171,64,.22); color:#ffcf8a; }
+  html[data-theme="dark"] .btn.dangerPrimary:hover{ background:#ff5c85; border-color:#ff5c85; }
 
   /* ---- bar chrome on dark: light-tint the drag-handle nub + drop the white label halo ---- */
   html[data-theme="dark"] .bar .blabel{ text-shadow:0 1px 2px rgba(0,0,0,.5); }
